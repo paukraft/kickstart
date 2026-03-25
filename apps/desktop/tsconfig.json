@@ -1,0 +1,19 @@
+{
+  "extends": "../../packages/config-typescript/electron.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    }
+  },
+  "include": [
+    "forge.config.ts",
+    "forge.env.d.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "vite.*.ts"
+  ]
+}
+

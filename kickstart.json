@@ -1,0 +1,15 @@
+{
+  "commands": [
+    {
+      "command": "bun dev",
+      "id": "command-bun-dev",
+      "startMode": "auto"
+    },
+    {
+      "command": "bun dist:desktop:mac",
+      "id": "command-bun-dist-desktop-mac",
+      "name": "build mac app",
+      "type": "action"
+    }
+  ]
+}

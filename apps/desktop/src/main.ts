@@ -1,0 +1,1169 @@
+import fs from "node:fs/promises";
+import { existsSync, watch, type FSWatcher } from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  type MenuItemConstructorOptions,
+} from "electron";
+import { autoUpdater } from "electron-updater";
+
+import {
+  CONFIG_FILE_NAME,
+  GENERAL_SPACE_ID,
+  isAutoStartCommand,
+  type ConfigChangedPayload,
+  type CreateGroupFromProjectsInput,
+  type CreateProjectInput,
+  type DeleteCommandInput,
+  type DesktopUpdateActionResult,
+  type DesktopUpdateState,
+  type MoveProjectToGroupInput,
+  type ProjectConfigPayload,
+  type ProjectRecord,
+  type ProjectWithRuntime,
+  type ReorderCommandsInput,
+  type ReorderProjectsInGroupInput,
+  type ReorderProjectsInput,
+  type ReorderRailInput,
+  type ReorderTabsInput,
+  type SelectProjectInput,
+  type SelectTabInput,
+  type ShortcutActionId,
+  type TerminalEvent,
+  type UpsertCommandInput,
+} from "@kickstart/contracts";
+import {
+  createCommandInConfig,
+  createEmptyKickstartConfig,
+  deleteCommandFromConfig,
+  hydrateEditableKickstartConfig,
+  kickstartConfigPath,
+  normalizeKickstartConfig,
+  reorderCommandsInConfig,
+  resolveProjectFavicon,
+  stringifyKickstartConfig,
+  upsertCommandInConfig,
+} from "@kickstart/core";
+
+import { AppStore } from "./lib/app-store";
+import { getEditorLaunchCommand, listAvailableEditors } from "./lib/editor-launcher";
+import { ensureProjectTab } from "./lib/project-tabs";
+import { getShortcutDefinitionsForMenu } from "./lib/shortcuts";
+import { TerminalManager } from "./lib/terminal-manager";
+
+function isGeneralSpace(projectId: string) {
+  return projectId === GENERAL_SPACE_ID;
+}
+
+const started =
+  process.platform === "win32"
+    ? Boolean(require("electron-squirrel-startup"))
+    : false;
+
+if (started) {
+  app.quit();
+}
+
+app.setName("Kickstart");
+
+function debounce<T extends (...args: never[]) => void>(fn: T, delay: number): T {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return ((...args: Parameters<T>) => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, delay);
+  }) as T;
+}
+
+let mainWindow: BrowserWindow | null = null;
+let store: AppStore | null = null;
+let terminalManager: TerminalManager | null = null;
+let isQuitting = false;
+const configWatchers = new Map<string, FSWatcher>();
+let updatePollTimer: ReturnType<typeof setInterval> | null = null;
+let updateStartupTimer: ReturnType<typeof setTimeout> | null = null;
+let updateCheckInFlight = false;
+let updateDownloadInFlight = false;
+let updaterConfigured = false;
+
+const UPDATE_STATE_CHANNEL = "kickstart:update-state";
+const UPDATE_GET_STATE_CHANNEL = "kickstart:get-update-state";
+const UPDATE_CHECK_CHANNEL = "kickstart:update-check";
+const UPDATE_DOWNLOAD_CHANNEL = "kickstart:update-download";
+const UPDATE_INSTALL_CHANNEL = "kickstart:update-install";
+const SHORTCUT_ACTION_CHANNEL = "kickstart:shortcut-action";
+const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
+const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const DEFAULT_UPDATE_REPOSITORY = "paukraft/kickstart";
+
+function createInitialDesktopUpdateState(currentVersion: string): DesktopUpdateState {
+  return {
+    availableVersion: null,
+    canRetry: false,
+    checkedAt: null,
+    currentVersion,
+    downloadedVersion: null,
+    downloadPercent: null,
+    enabled: false,
+    errorContext: null,
+    message: null,
+    status: "disabled",
+  };
+}
+
+let updateState: DesktopUpdateState = createInitialDesktopUpdateState(app.getVersion());
+
+function getAutoUpdateDisabledReason(args: {
+  hasUpdateRepository: boolean;
+  isDevelopment: boolean;
+  isPackaged: boolean;
+  platform: NodeJS.Platform;
+  disabledByEnv: boolean;
+}): string | null {
+  if (args.isDevelopment || !args.isPackaged) {
+    return "Automatic updates are only available in packaged production builds.";
+  }
+  if (args.disabledByEnv) {
+    return "Automatic updates are disabled by the KICKSTART_DISABLE_AUTO_UPDATE setting.";
+  }
+  if (args.platform !== "darwin" && args.platform !== "win32") {
+    return "Automatic updates are currently available on macOS and Windows builds only.";
+  }
+  if (!args.hasUpdateRepository) {
+    return "Automatic updates are not configured yet because no release feed has been set up.";
+  }
+  return null;
+}
+
+function resolveUpdateRepository(): string {
+  return (
+    process.env.KICKSTART_DESKTOP_UPDATE_REPOSITORY?.trim() ||
+    process.env.GITHUB_REPOSITORY?.trim() ||
+    DEFAULT_UPDATE_REPOSITORY
+  );
+}
+
+function resolveUpdateRepositoryParts() {
+  const repository = resolveUpdateRepository();
+  if (!repository) {
+    return null;
+  }
+
+  const [owner, repo] = repository.split("/");
+  if (!owner || !repo) {
+    return null;
+  }
+
+  return { owner, repo };
+}
+
+function shouldEnableAutoUpdates(): boolean {
+  return (
+    getAutoUpdateDisabledReason({
+      disabledByEnv: process.env.KICKSTART_DISABLE_AUTO_UPDATE === "1",
+      hasUpdateRepository: resolveUpdateRepository().length > 0,
+      isDevelopment: Boolean(getRendererDevServerUrl()),
+      isPackaged: app.isPackaged,
+      platform: process.platform,
+    }) === null
+  );
+}
+
+function emitUpdateState() {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) {
+      continue;
+    }
+    window.webContents.send(UPDATE_STATE_CHANNEL, updateState);
+  }
+}
+
+function setUpdateState(patch: Partial<DesktopUpdateState>) {
+  updateState = { ...updateState, ...patch };
+  emitUpdateState();
+}
+
+function clearUpdatePollTimer() {
+  if (updateStartupTimer) {
+    clearTimeout(updateStartupTimer);
+    updateStartupTimer = null;
+  }
+  if (updatePollTimer) {
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+  }
+}
+
+function dispatchShortcutAction(actionId: ShortcutActionId, targetWindow?: BrowserWindow | null) {
+  const window = targetWindow ?? BrowserWindow.getFocusedWindow() ?? mainWindow;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+  window.webContents.send(SHORTCUT_ACTION_CHANNEL, actionId);
+}
+
+function createShortcutMenuItems(section: Parameters<typeof getShortcutDefinitionsForMenu>[0]) {
+  return getShortcutDefinitionsForMenu(section).map<MenuItemConstructorOptions>((shortcut) => ({
+    accelerator: shortcut.accelerator,
+    click: (_menuItem, browserWindow) => {
+      dispatchShortcutAction(
+        shortcut.id,
+        browserWindow instanceof BrowserWindow ? browserWindow : undefined,
+      );
+    },
+    label: shortcut.menuLabel,
+  }));
+}
+
+function configureApplicationMenu() {
+  const template: MenuItemConstructorOptions[] = [];
+
+  if (process.platform === "darwin") {
+    template.push({
+      label: app.name,
+      submenu: [
+        { role: "about" },
+        {
+          label: "Check for Updates...",
+          click: () => {
+            void handleCheckForUpdatesMenuClick();
+          },
+        },
+        { type: "separator" },
+        ...createShortcutMenuItems("app"),
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    });
+  }
+
+  template.push(
+    {
+      label: "File",
+      submenu:
+        process.platform === "darwin"
+          ? createShortcutMenuItems("file")
+          : [...createShortcutMenuItems("file"), { type: "separator" }, { role: "quit" }],
+    },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    {
+      label: "Navigate",
+      submenu: createShortcutMenuItems("navigate"),
+    },
+    process.platform === "darwin"
+      ? {
+          label: "Window",
+          submenu: [
+            { role: "minimize" },
+            { role: "zoom" },
+            { type: "separator" },
+            { role: "front" },
+          ],
+        }
+      : { role: "windowMenu" },
+    {
+      role: "help",
+      submenu: [
+        ...createShortcutMenuItems("help"),
+        { type: "separator" },
+        {
+          label: "Check for Updates...",
+          click: () => {
+            void handleCheckForUpdatesMenuClick();
+          },
+        },
+      ],
+    },
+  );
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+async function handleCheckForUpdatesMenuClick() {
+  const disabledReason = getAutoUpdateDisabledReason({
+    disabledByEnv: process.env.KICKSTART_DISABLE_AUTO_UPDATE === "1",
+    hasUpdateRepository: resolveUpdateRepository().length > 0,
+    isDevelopment: Boolean(getRendererDevServerUrl()),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+  });
+
+  if (disabledReason) {
+    await dialog.showMessageBox({
+      buttons: ["OK"],
+      detail: disabledReason,
+      message: "Automatic updates are not available right now.",
+      title: "Updates unavailable",
+      type: "info",
+    });
+    return;
+  }
+
+  if (!BrowserWindow.getAllWindows().length) {
+    mainWindow = createWindow();
+  }
+  await checkForUpdates("menu");
+}
+
+async function checkForUpdates(reason: string): Promise<void> {
+  if (isQuitting || !updaterConfigured || updateCheckInFlight) {
+    return;
+  }
+  if (updateState.status === "downloading" || updateState.status === "downloaded") {
+    return;
+  }
+
+  updateCheckInFlight = true;
+  setUpdateState({
+    canRetry: false,
+    checkedAt: new Date().toISOString(),
+    downloadPercent: null,
+    errorContext: null,
+    message: null,
+    status: "checking",
+  });
+
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setUpdateState({
+      canRetry: updateState.availableVersion !== null || updateState.downloadedVersion !== null,
+      checkedAt: new Date().toISOString(),
+      downloadPercent: null,
+      errorContext: "check",
+      message,
+      status: "error",
+    });
+    console.error(`[desktop-updater] Failed to check for updates (${reason}): ${message}`);
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
+
+async function downloadAvailableUpdate(): Promise<{ accepted: boolean; completed: boolean }> {
+  if (!updaterConfigured || updateDownloadInFlight || updateState.status !== "available") {
+    return { accepted: false, completed: false };
+  }
+
+  updateDownloadInFlight = true;
+  setUpdateState({
+    canRetry: false,
+    downloadPercent: 0,
+    errorContext: null,
+    message: null,
+    status: "downloading",
+  });
+
+  try {
+    await autoUpdater.downloadUpdate();
+    return { accepted: true, completed: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setUpdateState({
+      canRetry: updateState.availableVersion !== null,
+      downloadPercent: null,
+      errorContext: "download",
+      message,
+      status: updateState.availableVersion ? "available" : "error",
+    });
+    console.error(`[desktop-updater] Failed to download update: ${message}`);
+    return { accepted: true, completed: false };
+  } finally {
+    updateDownloadInFlight = false;
+  }
+}
+
+async function installDownloadedUpdate(): Promise<{ accepted: boolean; completed: boolean }> {
+  if (isQuitting || !updaterConfigured || updateState.status !== "downloaded") {
+    return { accepted: false, completed: false };
+  }
+
+  isQuitting = true;
+  clearUpdatePollTimer();
+
+  try {
+    autoUpdater.quitAndInstall();
+    return { accepted: true, completed: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    isQuitting = false;
+    setUpdateState({
+      canRetry: true,
+      errorContext: "install",
+      message,
+      status: "error",
+    });
+    console.error(`[desktop-updater] Failed to install update: ${message}`);
+    return { accepted: true, completed: false };
+  }
+}
+
+function configureAutoUpdater() {
+  const enabled = shouldEnableAutoUpdates();
+  setUpdateState({
+    ...createInitialDesktopUpdateState(app.getVersion()),
+    enabled,
+    message: enabled
+      ? null
+      : getAutoUpdateDisabledReason({
+          disabledByEnv: process.env.KICKSTART_DISABLE_AUTO_UPDATE === "1",
+          hasUpdateRepository: resolveUpdateRepository().length > 0,
+          isDevelopment: Boolean(getRendererDevServerUrl()),
+          isPackaged: app.isPackaged,
+          platform: process.platform,
+        }),
+    status: enabled ? "idle" : "disabled",
+  });
+
+  if (!enabled) {
+    return;
+  }
+
+  const repository = resolveUpdateRepositoryParts();
+  if (!repository) {
+    setUpdateState({
+      canRetry: false,
+      enabled: false,
+      message: "Automatic updates are not configured because the GitHub repository is invalid.",
+      status: "disabled",
+    });
+    return;
+  }
+
+  updaterConfigured = true;
+  autoUpdater.setFeedURL({
+    owner: repository.owner,
+    provider: "github",
+    repo: repository.repo,
+  });
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.allowPrerelease = app.getVersion().includes("-");
+
+  autoUpdater.on("update-available", (info) => {
+    setUpdateState({
+      availableVersion: info.version,
+      canRetry: true,
+      checkedAt: new Date().toISOString(),
+      downloadedVersion: null,
+      downloadPercent: null,
+      errorContext: null,
+      message: null,
+      status: "available",
+    });
+  });
+
+  autoUpdater.on("update-not-available", () => {
+    setUpdateState({
+      availableVersion: null,
+      canRetry: false,
+      checkedAt: new Date().toISOString(),
+      downloadedVersion: null,
+      downloadPercent: null,
+      errorContext: null,
+      message: null,
+      status: "idle",
+    });
+  });
+
+  autoUpdater.on("download-progress", (progress) => {
+    setUpdateState({
+      downloadPercent: progress.percent,
+      message: null,
+      status: "downloading",
+    });
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    updateDownloadInFlight = false;
+    setUpdateState({
+      availableVersion: info.version,
+      canRetry: false,
+      downloadedVersion: info.version,
+      downloadPercent: 100,
+      errorContext: null,
+      message: null,
+      status: "downloaded",
+    });
+  });
+
+  autoUpdater.on("error", (error) => {
+    const errorContext = updateDownloadInFlight ? "download" : updateCheckInFlight ? "check" : null;
+    updateDownloadInFlight = false;
+    const message = error instanceof Error ? error.message : String(error);
+    setUpdateState({
+      canRetry: updateState.availableVersion !== null || updateState.downloadedVersion !== null,
+      checkedAt: new Date().toISOString(),
+      downloadPercent: null,
+      errorContext,
+      message,
+      status: "error",
+    });
+  });
+
+  autoUpdater.on("checking-for-update", () => {
+    setUpdateState({
+      canRetry: false,
+      checkedAt: new Date().toISOString(),
+      downloadPercent: null,
+      errorContext: null,
+      message: null,
+      status: "checking",
+    });
+  });
+
+  clearUpdatePollTimer();
+  updateStartupTimer = setTimeout(() => {
+    updateStartupTimer = null;
+    void checkForUpdates("startup");
+  }, AUTO_UPDATE_STARTUP_DELAY_MS);
+  updateStartupTimer.unref();
+
+  updatePollTimer = setInterval(() => {
+    void checkForUpdates("poll");
+  }, AUTO_UPDATE_POLL_INTERVAL_MS);
+  updatePollTimer.unref();
+}
+
+function getRendererDevServerUrl() {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    return process.env.VITE_DEV_SERVER_URL;
+  }
+
+  if (typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== "undefined") {
+    return MAIN_WINDOW_VITE_DEV_SERVER_URL;
+  }
+
+  return null;
+}
+
+function getRendererHtmlPath() {
+  const candidates = [
+    typeof MAIN_WINDOW_VITE_NAME !== "undefined"
+      ? path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`)
+      : null,
+    path.join(__dirname, "../dist-renderer/index.html"),
+  ];
+
+  const htmlPath = candidates.find(
+    (candidate): candidate is string =>
+      candidate !== null && existsSync(candidate),
+  );
+
+  if (!htmlPath) {
+    throw new Error("Renderer entrypoint not found");
+  }
+
+  return htmlPath;
+}
+
+function resolveResourcePath(fileName: string): string | null {
+  const candidates = [
+    path.join(__dirname, "../resources", fileName),
+    path.join(process.resourcesPath, "resources", fileName),
+    path.join(process.resourcesPath, fileName),
+  ];
+
+  const resourcePath = candidates.find((candidate) => existsSync(candidate));
+  return resourcePath ?? null;
+}
+
+function getStore() {
+  if (!store) {
+    throw new Error("App store not initialized.");
+  }
+  return store;
+}
+
+function getTerminalManager() {
+  if (!terminalManager) {
+    throw new Error("Terminal manager not initialized.");
+  }
+  return terminalManager;
+}
+
+function sendConfigChanged(payload: ConfigChangedPayload) {
+  if (!mainWindow?.webContents || mainWindow.webContents.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("kickstart:config-changed", payload);
+}
+
+function sendTerminalEvent(event: TerminalEvent) {
+  if (!mainWindow?.webContents || mainWindow.webContents.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("kickstart:terminal-event", event);
+}
+
+async function loadProjectConfig(project: ProjectRecord): Promise<ProjectConfigPayload> {
+  const filePath = kickstartConfigPath(project.path);
+  if (!existsSync(filePath)) {
+    return {
+      config: null,
+      configError: null,
+      configExists: false,
+    };
+  }
+
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return {
+      config: hydrateEditableKickstartConfig(JSON.parse(raw)),
+      configError: null,
+      configExists: true,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[kickstart-config] Failed to load config for ${project.path}: ${message}`);
+    return {
+      config: null,
+      configError: message,
+      configExists: true,
+    };
+  }
+}
+
+async function persistProjectConfig(project: ProjectRecord, config: ProjectConfigPayload["config"]) {
+  if (!config) {
+    throw new Error("Cannot persist empty config.");
+  }
+  await fs.writeFile(
+    kickstartConfigPath(project.path),
+    stringifyKickstartConfig(normalizeKickstartConfig(config)),
+    "utf8",
+  );
+}
+
+async function configPayloadForProject(projectId: string): Promise<ProjectConfigPayload> {
+  const project = getStore().getProject(projectId);
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+  return loadProjectConfig(project);
+}
+
+async function syncProjectTabs(projectId: string, config: ProjectConfigPayload["config"]) {
+  const normalizedConfig = config ? normalizeKickstartConfig(config) : null;
+  const sessions = await getTerminalManager().getProjectSessions(projectId);
+  const runningTabIds = new Set(
+    sessions
+      .filter((session) =>
+        session.hasActiveProcess || session.status === "starting" || session.status === "stopping",
+      )
+      .map((session) => session.tabId),
+  );
+  return getStore().syncTabs(projectId, normalizedConfig?.commands ?? [], runningTabIds);
+}
+
+async function syncProjectTabsForProject(projectId: string) {
+  if (isGeneralSpace(projectId)) {
+    return getStore().getTabState(projectId);
+  }
+  const payload = await configPayloadForProject(projectId);
+  return syncProjectTabs(projectId, payload.config);
+}
+
+async function ensureProjectTabAvailable(projectId: string, tabId: string) {
+  return ensureProjectTab({
+    getTab: (currentProjectId, currentTabId) => getStore().getTab(currentProjectId, currentTabId),
+    projectId,
+    syncProjectTabs: async (currentProjectId) => {
+      await syncProjectTabsForProject(currentProjectId);
+    },
+    tabId,
+  });
+}
+
+async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
+  const projects = getStore().listProjects();
+  return Promise.all(
+    projects.map(async (project) => {
+      const config = await loadProjectConfig(project);
+      const startupCommandIds =
+        config.config?.commands.filter(isAutoStartCommand).map((command) => command.id) ??
+        [];
+      const trackedTabIds = startupCommandIds.map((commandId) => `command:${commandId}`);
+      const trackedTabIdSet = new Set(trackedTabIds);
+      const sessions = await getTerminalManager().getProjectSessions(project.id);
+      const trackedSessions = sessions.filter((session) => trackedTabIdSet.has(session.tabId));
+      const runningCommandCount = trackedSessions.filter((session) => session.hasActiveProcess).length;
+      const startupCommandCount = startupCommandIds.length;
+      const hasStartingCommand = trackedSessions.some((session) => session.status === "starting");
+      const hasStoppingCommand = trackedSessions.some((session) => session.status === "stopping");
+      const runtimeState =
+        hasStartingCommand
+          ? "starting"
+          : hasStoppingCommand
+            ? "stopping"
+          : runningCommandCount === 0
+          ? "not-running"
+          : runningCommandCount === startupCommandCount
+            ? "running"
+            : "partially-running";
+      const favicon = await resolveProjectFavicon(project.path);
+      return {
+        configExists: config.configExists,
+        groupId: project.groupId,
+        iconUrl: favicon
+          ? `data:${favicon.contentType};base64,${
+              (typeof favicon.body === "string"
+                ? Buffer.from(favicon.body, "utf8")
+                : Buffer.from(favicon.body)
+              ).toString("base64")
+            }`
+          : null,
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        startupCommandCount,
+        runningCommandCount,
+        runtimeState,
+        sortOrder: project.sortOrder,
+      } satisfies ProjectWithRuntime;
+    }),
+  );
+}
+
+async function emitConfigChanged(projectId: string) {
+  const project = getStore().getProject(projectId);
+  if (!project) {
+    return;
+  }
+  const payload = await loadProjectConfig(project);
+  const tabs = await syncProjectTabs(projectId, payload.config);
+  sendConfigChanged({
+    config: payload.config,
+    configError: payload.configError ?? null,
+    configExists: payload.configExists,
+    projectId,
+    tabs: tabs.tabs,
+  });
+}
+
+function watchProjectConfig(project: ProjectRecord) {
+  if (configWatchers.has(project.id)) {
+    return;
+  }
+  const reload = debounce(() => {
+    void emitConfigChanged(project.id);
+  }, 120);
+
+  try {
+    const watcher = watch(project.path, (eventType, filename) => {
+      if (eventType !== "change" && eventType !== "rename") {
+        return;
+      }
+      if (filename && filename !== CONFIG_FILE_NAME) {
+        return;
+      }
+      reload();
+    });
+    configWatchers.set(project.id, watcher);
+  } catch {
+    // Ignore watcher failures for now.
+  }
+}
+
+function refreshProjectWatchers() {
+  const nextIds = new Set(getStore().listProjects().map((project) => project.id));
+  for (const [projectId, watcher] of configWatchers.entries()) {
+    if (nextIds.has(projectId)) {
+      continue;
+    }
+    watcher.close();
+    configWatchers.delete(projectId);
+  }
+  for (const project of getStore().listProjects()) {
+    watchProjectConfig(project);
+  }
+}
+
+async function upsertProjectCommand(input: UpsertCommandInput) {
+  const project = getStore().getProject(input.projectId);
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+  const payload = await loadProjectConfig(project);
+  const nextConfig = upsertCommandInConfig(
+    normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
+    input.command,
+  );
+  await persistProjectConfig(project, nextConfig);
+  await emitConfigChanged(input.projectId);
+  return loadProjectConfig(project);
+}
+
+async function createProjectCommand(input: UpsertCommandInput) {
+  const project = getStore().getProject(input.projectId);
+  if (!project) {
+    throw new Error("Project not found.");
+  }
+  const payload = await loadProjectConfig(project);
+  const nextConfig = createCommandInConfig(
+    normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
+    input.command,
+  );
+  await persistProjectConfig(project, nextConfig);
+  await emitConfigChanged(input.projectId);
+  return loadProjectConfig(project);
+}
+
+function createWindow() {
+  const window = new BrowserWindow({
+    backgroundColor: "#0a0d12",
+    height: 900,
+    titleBarStyle: "hiddenInset",
+    width: 1460,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"),
+      sandbox: true,
+    },
+  });
+
+  const rendererDevServerUrl = getRendererDevServerUrl();
+  if (rendererDevServerUrl) {
+    void window.loadURL(rendererDevServerUrl);
+  } else {
+    void window.loadFile(getRendererHtmlPath());
+  }
+
+  return window;
+}
+
+function registerIpcHandlers() {
+  ipcMain.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
+  ipcMain.handle(UPDATE_CHECK_CHANNEL, async () => {
+    await checkForUpdates("renderer");
+    return {
+      accepted: updaterConfigured,
+      completed: updateState.status !== "checking",
+      state: updateState,
+    } satisfies DesktopUpdateActionResult;
+  });
+  ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, async () => {
+    const result = await downloadAvailableUpdate();
+    return {
+      accepted: result.accepted,
+      completed: result.completed,
+      state: updateState,
+    } satisfies DesktopUpdateActionResult;
+  });
+  ipcMain.handle(UPDATE_INSTALL_CHANNEL, async () => {
+    const result = await installDownloadedUpdate();
+    return {
+      accepted: result.accepted,
+      completed: result.completed,
+      state: updateState,
+    } satisfies DesktopUpdateActionResult;
+  });
+
+  ipcMain.handle("kickstart:list-projects", async () => listProjectsWithRuntime());
+  ipcMain.handle("kickstart:list-available-editors", async () => listAvailableEditors());
+
+  ipcMain.handle("kickstart:select-folder", async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ["openDirectory"],
+      title: "Select project folder",
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+
+  ipcMain.handle(
+    "kickstart:open-in-editor",
+    async (_event, payload: { editorId: import("@kickstart/contracts").EditorId; path: string }) => {
+      const launch = getEditorLaunchCommand(payload.path, payload.editorId);
+      await new Promise<void>((resolve, reject) => {
+        let child;
+
+        try {
+          child = spawn(launch.command, launch.args, {
+            detached: true,
+            shell: process.platform === "win32",
+            stdio: "ignore",
+          });
+        } catch (error) {
+          reject(error);
+          return;
+        }
+
+        child.once("spawn", () => {
+          child.unref();
+          resolve();
+        });
+        child.once("error", reject);
+      });
+    },
+  );
+
+  ipcMain.handle("kickstart:create-project", async (_event, input: CreateProjectInput) => {
+    const projectName = path.basename(input.path);
+    const project = getStore().createProject(input.path, projectName);
+    refreshProjectWatchers();
+    await emitConfigChanged(project.id);
+    return (await listProjectsWithRuntime()).find((item) => item.id === project.id);
+  });
+
+  ipcMain.handle("kickstart:delete-project", async (_event, projectId: string) => {
+    configWatchers.get(projectId)?.close();
+    configWatchers.delete(projectId);
+    await getTerminalManager().closeProject(projectId);
+    getStore().deleteProject(projectId);
+  });
+
+  ipcMain.handle("kickstart:reorder-projects", async (_event, input: ReorderProjectsInput) => {
+    getStore().reorderProjects(input.projectIds);
+    return listProjectsWithRuntime();
+  });
+
+  ipcMain.handle("kickstart:select-project", async (_event, input: SelectProjectInput) => {
+    getStore().selectProject(input.projectId);
+  });
+
+  // ── Groups ──────────────────────────────────────────────────
+
+  ipcMain.handle("kickstart:list-groups", async () => getStore().listGroups());
+
+  ipcMain.handle("kickstart:create-group-from-projects", async (_event, input: CreateGroupFromProjectsInput) => {
+    getStore().createGroupFromProjects(input.projectIdA, input.projectIdB);
+  });
+
+  ipcMain.handle("kickstart:move-project-to-group", async (_event, input: MoveProjectToGroupInput) => {
+    getStore().moveProjectToGroup(input.projectId, input.groupId);
+  });
+
+  ipcMain.handle("kickstart:remove-project-from-group", async (_event, projectId: string) => {
+    getStore().removeProjectFromGroup(projectId);
+  });
+
+  ipcMain.handle("kickstart:toggle-group-collapsed", async (_event, groupId: string) => {
+    getStore().toggleGroupCollapsed(groupId);
+  });
+
+  ipcMain.handle("kickstart:reorder-rail", async (_event, input: ReorderRailInput) => {
+    getStore().reorderRail(input.items);
+  });
+
+  ipcMain.handle("kickstart:reorder-projects-in-group", async (_event, input: ReorderProjectsInGroupInput) => {
+    getStore().reorderProjectsInGroup(input.groupId, input.projectIds);
+  });
+
+  ipcMain.handle("kickstart:get-project-config", async (_event, projectId: string) => {
+    return configPayloadForProject(projectId);
+  });
+
+  ipcMain.handle("kickstart:get-project-terminal-sessions", async (_event, projectId: string) => {
+    return getTerminalManager().getProjectSessions(projectId);
+  });
+
+  ipcMain.handle("kickstart:create-project-config", async (_event, projectId: string) => {
+    const project = getStore().getProject(projectId);
+    if (!project) {
+      throw new Error("Project not found.");
+    }
+    const config = createEmptyKickstartConfig();
+    await persistProjectConfig(project, config);
+    await emitConfigChanged(projectId);
+    return loadProjectConfig(project);
+  });
+
+  ipcMain.handle("kickstart:create-command", async (_event, input: UpsertCommandInput) => {
+    return createProjectCommand(input);
+  });
+
+  ipcMain.handle("kickstart:update-command", async (_event, input: UpsertCommandInput) => {
+    return upsertProjectCommand(input);
+  });
+
+  ipcMain.handle("kickstart:delete-command", async (_event, input: DeleteCommandInput) => {
+    const project = getStore().getProject(input.projectId);
+    if (!project) {
+      throw new Error("Project not found.");
+    }
+    const payload = await loadProjectConfig(project);
+    const nextConfig = deleteCommandFromConfig(
+      normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
+      input.commandId,
+    );
+    await persistProjectConfig(project, nextConfig);
+    await emitConfigChanged(input.projectId);
+    return loadProjectConfig(project);
+  });
+
+  ipcMain.handle("kickstart:reorder-commands", async (_event, input: ReorderCommandsInput) => {
+    const project = getStore().getProject(input.projectId);
+    if (!project) {
+      throw new Error("Project not found.");
+    }
+    const payload = await loadProjectConfig(project);
+    const nextConfig = reorderCommandsInConfig(
+      normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
+      input.commandIds,
+    );
+    await persistProjectConfig(project, nextConfig);
+    await emitConfigChanged(input.projectId);
+    return loadProjectConfig(project);
+  });
+
+  ipcMain.handle("kickstart:get-project-tabs", async (_event, projectId: string) => {
+    return syncProjectTabsForProject(projectId);
+  });
+
+  ipcMain.handle("kickstart:create-shell-tab", async (_event, input: { projectId: string }) => {
+    return getStore().createShellTab(input.projectId);
+  });
+
+  ipcMain.handle("kickstart:delete-shell-tab", async (_event, projectId: string, tabId: string) => {
+    await getTerminalManager().close({
+      deleteHistory: true,
+      projectId,
+      tabId,
+    });
+    return getStore().deleteShellTab(projectId, tabId);
+  });
+
+  ipcMain.handle("kickstart:reorder-tabs", async (_event, input: ReorderTabsInput) => {
+    return getStore().reorderTabs(input.projectId, input.tabIds);
+  });
+
+  ipcMain.handle("kickstart:select-tab", async (_event, input: SelectTabInput) => {
+    getStore().selectTab(input.projectId, input.tabId);
+  });
+
+  ipcMain.handle("kickstart:terminal-open", async (_event, input) => {
+    return getTerminalManager().open(input);
+  });
+  ipcMain.handle("kickstart:terminal-write", async (_event, input) => {
+    return getTerminalManager().write(input);
+  });
+  ipcMain.handle("kickstart:terminal-resize", async (_event, input) => {
+    return getTerminalManager().resize(input);
+  });
+  ipcMain.handle("kickstart:terminal-run", async (_event, input) => {
+    return getTerminalManager().runCommand(input);
+  });
+  ipcMain.handle("kickstart:terminal-restart", async (_event, input) => {
+    return getTerminalManager().restartCommand(input);
+  });
+  ipcMain.handle("kickstart:terminal-stop", async (_event, input) => {
+    return getTerminalManager().stopCommand(input);
+  });
+  ipcMain.handle("kickstart:terminal-close", async (_event, input) => {
+    return getTerminalManager().close(input);
+  });
+
+  ipcMain.handle("kickstart:run-project-start", async (_event, projectId: string) => {
+    const payload = await configPayloadForProject(projectId);
+    await syncProjectTabsForProject(projectId);
+    const startupCommands = payload.config?.commands.filter(isAutoStartCommand) ?? [];
+
+    await Promise.all(
+      startupCommands.map(async (command) => {
+        const tabId = `command:${command.id}`;
+        const session = await getTerminalManager().getSession(projectId, tabId);
+        if (session?.managedRunActive) {
+          return;
+        }
+        await getTerminalManager().runCommand({
+          projectId,
+          tabId,
+        });
+      }),
+    );
+  });
+
+  ipcMain.handle("kickstart:stop-project-start", async (_event, projectId: string) => {
+    const payload = await configPayloadForProject(projectId);
+    for (const command of payload.config?.commands.filter(isAutoStartCommand) ?? []) {
+      await getTerminalManager().stopCommand({
+        projectId,
+        tabId: `command:${command.id}`,
+      });
+    }
+  });
+}
+
+async function createAppState() {
+  const userDataPath = app.getPath("userData");
+  store = new AppStore(path.join(userDataPath, "kickstart.sqlite"));
+  terminalManager = new TerminalManager({
+    historyDir: path.join(userDataPath, "terminal-history"),
+    loadCommand: async (projectId, commandId) => {
+      const project = getStore().getProject(projectId);
+      if (!project) {
+        return null;
+      }
+      const payload = await loadProjectConfig(project);
+      const commands = payload.config
+        ? normalizeKickstartConfig(payload.config).commands
+        : [];
+      return commands.find((command) => command.id === commandId) ?? null;
+    },
+    loadProject: async (projectId) => getStore().getProject(projectId),
+    loadTab: async (projectId, tabId) => ensureProjectTabAvailable(projectId, tabId),
+    persistTabCwd: async (projectId, tabId, cwd) => getStore().updateTabShellCwd(projectId, tabId, cwd),
+    onEvent: sendTerminalEvent,
+  });
+
+  for (const project of getStore().listProjects()) {
+    await emitConfigChanged(project.id);
+  }
+  refreshProjectWatchers();
+}
+
+app.whenReady().then(async () => {
+  if (process.platform === "darwin" && app.dock) {
+    const iconPath = resolveResourcePath("icon.png");
+    if (iconPath) {
+      app.dock.setIcon(iconPath);
+    }
+  }
+
+  await createAppState();
+  configureApplicationMenu();
+  configureAutoUpdater();
+  registerIpcHandlers();
+  mainWindow = createWindow();
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      mainWindow = createWindow();
+    }
+  });
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") {
+    app.quit();
+  }
+});
+
+app.on("before-quit", () => {
+  isQuitting = true;
+  clearUpdatePollTimer();
+  for (const watcher of configWatchers.values()) {
+    watcher.close();
+  }
+  configWatchers.clear();
+  store?.close();
+});

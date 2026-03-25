@@ -1,0 +1,39 @@
+{
+  "name": "kickstart",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "bun@1.3.3",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paukraft/kickstart.git"
+  },
+  "bugs": {
+    "url": "https://github.com/paukraft/kickstart/issues"
+  },
+  "homepage": "https://github.com/paukraft/kickstart",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --filter=@kickstart/desktop --filter=@kickstart/marketing",
+    "dev:desktop": "turbo run dev --filter=@kickstart/desktop",
+    "dev:marketing": "turbo run dev --filter=@kickstart/marketing",
+    "dist:desktop:artifact": "node scripts/build-desktop-artifact.mjs",
+    "dist:desktop:linux": "node scripts/build-desktop-artifact.mjs --platform linux",
+    "dist:desktop:mac": "node scripts/build-desktop-artifact.mjs --platform darwin",
+    "dist:desktop:win": "node scripts/build-desktop-artifact.mjs --platform win32",
+    "lint": "turbo run lint",
+    "release:desktop:mac": "node scripts/release-desktop-mac.mjs",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "oxlint": "^1.51.0",
+    "turbo": "^2.8.14",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.4"
+  }
+}
