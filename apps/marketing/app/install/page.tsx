@@ -1,10 +1,7 @@
-import { AppleIcon } from "@/components/icons"
-
-import { TrackedDownloadLink } from "@/components/tracked-download-link"
-import { Button } from "@/components/ui/button"
+import { LatestMacDownloadButton } from "@/components/latest-mac-download-button"
 
 const steps = [
-  "Download the latest release from GitHub.",
+  "Download the latest Kickstart DMG.",
   "Open the DMG and drag Kickstart into Applications.",
   "Open Kickstart. If macOS blocks it: System Settings → Privacy & Security → Open Anyway.",
   "To update, just download the new version and replace the app.",
@@ -22,18 +19,7 @@ export default function InstallPage() {
             will ask you to approve it manually. Everything works the same.
           </p>
           <div className="mt-8">
-            <Button
-              size="lg"
-              render={
-                <TrackedDownloadLink
-                  href="https://github.com/paukraft/kickstart/releases/latest"
-                  location="install-page"
-                />
-              }
-            >
-              <AppleIcon className="size-5" />
-              Download for macOS
-            </Button>
+            <LatestMacDownloadButton />
           </div>
 
           <ol className="mt-12 space-y-4">
