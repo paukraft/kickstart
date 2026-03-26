@@ -44,8 +44,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { commandByTabId, getPreferredCommandTabId } from "@/lib/command-utils";
 import { reorderByIds, type RelativePosition } from "@/lib/reorder";
 import { getShortcutTabIndex } from "@/lib/shortcuts";
+import { installSoundAutoplayUnlock, playSound } from "@/lib/sounds";
 
 const GENERAL_SPACE_NAME = "General";
+const RELEASES_URL = "https://github.com/paukraft/kickstart/releases/latest";
 type CommandDialogState =
   | { mode: "create" }
   | { mode: "edit"; commandId: string }
@@ -110,9 +112,13 @@ function shouldShowUpdateBanner(updateState: DesktopUpdateState) {
 function getUpdateBannerCopy(updateState: DesktopUpdateState) {
   switch (updateState.status) {
     case "checking":
-      return "Checking for updates...";
+      return updateState.updateMode === "manual"
+        ? "Checking for a new build..."
+        : "Checking for updates...";
     case "available":
-      return `Kickstart ${updateState.availableVersion ?? ""} is available.`;
+      return updateState.updateMode === "manual"
+        ? updateState.message ?? `Kickstart ${updateState.availableVersion ?? ""} is ready on GitHub.`
+        : `Kickstart ${updateState.availableVersion ?? ""} is available.`;
     case "downloading":
       if (updateState.availableVersion) {
         return `Downloading Kickstart ${updateState.availableVersion}${
@@ -146,6 +152,30 @@ function getUpdateBannerSessionKey(updateState: DesktopUpdateState) {
     default:
       return null;
   }
+}
+
+function getSessionEventKey(projectId: string, tabId: string) {
+  return `${projectId}:${tabId}`;
+}
+
+const ACTION_COMPLETION_CONFIRM_DELAY_MS = 400;
+
+function showsSidebarStartAction(session: TerminalSessionSnapshot | undefined) {
+  return (
+    !session ||
+    (!session.hasActiveProcess &&
+      session.status !== "starting" &&
+      session.status !== "stopping")
+  );
+}
+
+function didActionSidebarTransitionToStart(
+  previous: TerminalSessionSnapshot | undefined,
+  next: TerminalSessionSnapshot | undefined,
+) {
+  const previouslyBlocked =
+    previous !== undefined && !showsSidebarStartAction(previous);
+  return previouslyBlocked && showsSidebarStartAction(next);
 }
 
 export function App() {
@@ -182,7 +212,11 @@ export function App() {
   const projectListRequestRef = useRef(0);
   const projectStateRequestRef = useRef(0);
   const terminalSessionsRequestRef = useRef(0);
+  const previousTerminalSessionsRef = useRef<Record<string, TerminalSessionSnapshot>>({});
+  const latestTerminalSessionsRef = useRef<Record<string, TerminalSessionSnapshot>>({});
+  const pendingCompletionSoundTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   selectedProjectIdRef.current = selectedProjectId;
+  latestTerminalSessionsRef.current = terminalSessions;
 
   // ── Derived ─────────────────────────────────────────────────
   const selectedProject = useMemo(
@@ -375,7 +409,42 @@ export function App() {
     };
   });
 
+  const playActionCompletionSound = useEffectEvent(
+    async (projectId: string, tabId: string) => {
+      const [runtime, sessions] = await Promise.all([
+        fetchProjectRuntime(projectId),
+        window.desktop.getProjectTerminalSessions(projectId),
+      ]);
+      const session = sessions.find((item) => item.tabId === tabId);
+      if (!showsSidebarStartAction(session)) {
+        return;
+      }
+      const tab = runtime.tabs.tabs.find((item) => item.id === tabId);
+      if (!tab?.commandId) {
+        return;
+      }
+      const command = runtime.commands.find((item) => item.id === tab.commandId);
+      if (command?.type !== "action" || !command.soundId) {
+        return;
+      }
+      await playSound(command.soundId);
+    },
+  );
+
   // ── Effects ─────────────────────────────────────────────────
+  useEffect(() => {
+    installSoundAutoplayUnlock();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(pendingCompletionSoundTimersRef.current)) {
+        clearTimeout(timer);
+      }
+      pendingCompletionSoundTimersRef.current = {};
+    };
+  }, []);
+
   useEffect(() => {
     void refreshProjects();
   }, []);
@@ -404,20 +473,68 @@ export function App() {
 
   useEffect(() => {
     return window.desktop.watchTerminalEvents((event) => {
-      if (!selectedProjectId || event.projectId !== selectedProjectId) {
-        return;
-      }
       if (
-        event.type !== "started" &&
-        event.type !== "stopped" &&
-        event.type !== "cleared" &&
-        event.type !== "updated"
+        !selectedProjectId ||
+        event.projectId !== selectedProjectId ||
+        (event.type !== "started" &&
+          event.type !== "stopped" &&
+          event.type !== "cleared" &&
+          event.type !== "updated")
       ) {
         return;
       }
       void refreshSelectedProjectRuntime(event.projectId);
     });
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      previousTerminalSessionsRef.current = {};
+      return;
+    }
+
+    const previousSessions = previousTerminalSessionsRef.current;
+
+    for (const [tabId, session] of Object.entries(terminalSessions)) {
+      const previousSession = previousSessions[tabId];
+      if (!didActionSidebarTransitionToStart(previousSession, session)) {
+        continue;
+      }
+
+      const tab = tabs.find((item) => item.id === tabId);
+      if (!tab?.commandId) {
+        continue;
+      }
+      const command = commands.find((item) => item.id === tab.commandId);
+      if (command?.type !== "action" || !command.soundId) {
+        continue;
+      }
+
+      const key = getSessionEventKey(selectedProjectId, tabId);
+      const pendingTimer = pendingCompletionSoundTimersRef.current[key];
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+      }
+      pendingCompletionSoundTimersRef.current[key] = setTimeout(() => {
+        const latestSession = latestTerminalSessionsRef.current[tabId];
+        if (didActionSidebarTransitionToStart(previousSession, latestSession)) {
+          void playActionCompletionSound(selectedProjectId, tabId);
+        }
+        delete pendingCompletionSoundTimersRef.current[key];
+      }, ACTION_COMPLETION_CONFIRM_DELAY_MS);
+    }
+
+    for (const [key, timer] of Object.entries(pendingCompletionSoundTimersRef.current)) {
+      const tabId = key.split(":").slice(1).join(":");
+      const session = terminalSessions[tabId];
+      if (!showsSidebarStartAction(session)) {
+        clearTimeout(timer);
+        delete pendingCompletionSoundTimersRef.current[key];
+      }
+    }
+
+    previousTerminalSessionsRef.current = terminalSessions;
+  }, [commands, selectedProjectId, tabs, terminalSessions]);
 
   useEffect(() => {
     if (!selectedProjectId) {
@@ -934,12 +1051,12 @@ export function App() {
         shouldShowUpdateBanner(updateState) &&
         updateBannerCopy &&
         !isUpdateBannerDismissed ? (
-          <div className="border-b bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          <div className="border-b bg-muted/50 px-3 py-2 text-sm">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="truncate font-medium">{updateBannerCopy}</p>
+                <p className="truncate font-medium text-foreground">{updateBannerCopy}</p>
                 {updateState.status === "error" && updateState.checkedAt ? (
-                  <p className="text-xs text-amber-900/80">
+                  <p className="text-xs text-muted-foreground">
                     Last checked{" "}
                     {new Date(updateState.checkedAt).toLocaleString()}
                   </p>
@@ -959,13 +1076,23 @@ export function App() {
                 ) : null}
 
                 {updateState.status === "available" ? (
-                  <Button
-                    size="xs"
-                    disabled={updateActionPending}
-                    onClick={() => void window.desktop.downloadUpdate()}
-                  >
-                    Update
-                  </Button>
+                  updateState.updateMode === "manual" ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => void window.desktop.openExternalUrl(RELEASES_URL)}
+                    >
+                      Get Latest Build
+                    </Button>
+                  ) : (
+                    <Button
+                      size="xs"
+                      disabled={updateActionPending}
+                      onClick={() => void window.desktop.downloadUpdate()}
+                    >
+                      Update
+                    </Button>
+                  )
                 ) : null}
 
                 {updateState.status === "downloaded" ? (

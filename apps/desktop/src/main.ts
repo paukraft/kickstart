@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { existsSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -9,6 +9,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  shell,
   type MenuItemConstructorOptions,
 } from "electron";
 import { autoUpdater } from "electron-updater";
@@ -22,6 +23,7 @@ import {
   type CreateProjectInput,
   type DeleteCommandInput,
   type DesktopUpdateActionResult,
+  type DesktopUpdateMode,
   type DesktopUpdateState,
   type MoveProjectToGroupInput,
   type ProjectConfigPayload,
@@ -95,6 +97,7 @@ let updateStartupTimer: ReturnType<typeof setTimeout> | null = null;
 let updateCheckInFlight = false;
 let updateDownloadInFlight = false;
 let updaterConfigured = false;
+let releaseChecksConfigured = false;
 
 const UPDATE_STATE_CHANNEL = "kickstart:update-state";
 const UPDATE_GET_STATE_CHANNEL = "kickstart:get-update-state";
@@ -106,7 +109,27 @@ const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_UPDATE_REPOSITORY = "paukraft/kickstart";
 
-function createInitialDesktopUpdateState(currentVersion: string): DesktopUpdateState {
+function resolvePackagedUpdateMode(): "auto" | "manual" {
+  if (!app.isPackaged) {
+    return "auto";
+  }
+
+  try {
+    const packageJsonPath = path.join(app.getAppPath(), "package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      kickstart?: { updateMode?: string };
+    };
+
+    return packageJson.kickstart?.updateMode === "manual" ? "manual" : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function createInitialDesktopUpdateState(
+  currentVersion: string,
+  updateMode: DesktopUpdateMode,
+): DesktopUpdateState {
   return {
     availableVersion: null,
     canRetry: false,
@@ -118,29 +141,50 @@ function createInitialDesktopUpdateState(currentVersion: string): DesktopUpdateS
     errorContext: null,
     message: null,
     status: "disabled",
+    updateMode,
   };
 }
 
-let updateState: DesktopUpdateState = createInitialDesktopUpdateState(app.getVersion());
+let updateState: DesktopUpdateState = createInitialDesktopUpdateState(
+  app.getVersion(),
+  resolvePackagedUpdateMode(),
+);
+
+function getUpdateCheckDisabledReason(args: {
+  hasUpdateRepository: boolean;
+  isDevelopment: boolean;
+  isPackaged: boolean;
+  disabledByEnv: boolean;
+}): string | null {
+  if (args.isDevelopment || !args.isPackaged) {
+    return "Update checks are only available in packaged production builds.";
+  }
+  if (args.disabledByEnv) {
+    return "Update checks are disabled by the KICKSTART_DISABLE_AUTO_UPDATE setting.";
+  }
+  if (!args.hasUpdateRepository) {
+    return "Update checks are not configured yet because no release feed has been set up.";
+  }
+  return null;
+}
 
 function getAutoUpdateDisabledReason(args: {
   hasUpdateRepository: boolean;
   isDevelopment: boolean;
   isPackaged: boolean;
+  isManualUpdateBuild: boolean;
   platform: NodeJS.Platform;
   disabledByEnv: boolean;
 }): string | null {
-  if (args.isDevelopment || !args.isPackaged) {
-    return "Automatic updates are only available in packaged production builds.";
-  }
-  if (args.disabledByEnv) {
-    return "Automatic updates are disabled by the KICKSTART_DISABLE_AUTO_UPDATE setting.";
+  const checkDisabledReason = getUpdateCheckDisabledReason(args);
+  if (checkDisabledReason) {
+    return checkDisabledReason;
   }
   if (args.platform !== "darwin" && args.platform !== "win32") {
-    return "Automatic updates are currently available on macOS and Windows builds only.";
+    return "Automatic installs are currently available on macOS and Windows builds only.";
   }
-  if (!args.hasUpdateRepository) {
-    return "Automatic updates are not configured yet because no release feed has been set up.";
+  if (args.isManualUpdateBuild) {
+    return "This build checks for new releases, but installs updates manually from GitHub Releases.";
   }
   return null;
 }
@@ -167,6 +211,17 @@ function resolveUpdateRepositoryParts() {
   return { owner, repo };
 }
 
+function shouldEnableReleaseChecks(): boolean {
+  return (
+    getUpdateCheckDisabledReason({
+      disabledByEnv: process.env.KICKSTART_DISABLE_AUTO_UPDATE === "1",
+      hasUpdateRepository: resolveUpdateRepository().length > 0,
+      isDevelopment: Boolean(getRendererDevServerUrl()),
+      isPackaged: app.isPackaged,
+    }) === null
+  );
+}
+
 function shouldEnableAutoUpdates(): boolean {
   return (
     getAutoUpdateDisabledReason({
@@ -174,9 +229,72 @@ function shouldEnableAutoUpdates(): boolean {
       hasUpdateRepository: resolveUpdateRepository().length > 0,
       isDevelopment: Boolean(getRendererDevServerUrl()),
       isPackaged: app.isPackaged,
+      isManualUpdateBuild: resolvePackagedUpdateMode() === "manual",
       platform: process.platform,
     }) === null
   );
+}
+
+function normalizeVersion(version: string): string {
+  return version.trim().replace(/^v/i, "");
+}
+
+function compareVersions(left: string, right: string): number {
+  const [leftCore, leftPrerelease = ""] = normalizeVersion(left).split("-", 2);
+  const [rightCore, rightPrerelease = ""] = normalizeVersion(right).split("-", 2);
+
+  const leftParts = leftCore.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = rightCore.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const maxLength = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const diff = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (diff !== 0) {
+      return diff > 0 ? 1 : -1;
+    }
+  }
+
+  if (leftPrerelease && !rightPrerelease) {
+    return -1;
+  }
+  if (!leftPrerelease && rightPrerelease) {
+    return 1;
+  }
+  return leftPrerelease.localeCompare(rightPrerelease);
+}
+
+async function fetchLatestReleaseVersion(args: {
+  allowPrerelease: boolean;
+  owner: string;
+  repo: string;
+}): Promise<string> {
+  const endpoint = args.allowPrerelease
+    ? `https://api.github.com/repos/${args.owner}/${args.repo}/releases?per_page=20`
+    : `https://api.github.com/repos/${args.owner}/${args.repo}/releases/latest`;
+  const response = await fetch(endpoint, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "Kickstart Desktop",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub release check failed with status ${response.status}.`);
+  }
+
+  const payload = (await response.json()) as
+    | { tag_name?: string }
+    | Array<{ draft?: boolean; prerelease?: boolean; tag_name?: string }>;
+
+  const release = Array.isArray(payload)
+    ? payload.find((entry) => !entry.draft && (args.allowPrerelease || !entry.prerelease))
+    : payload;
+
+  if (!release?.tag_name) {
+    throw new Error("GitHub did not return a latest release tag.");
+  }
+
+  return normalizeVersion(release.tag_name);
 }
 
 function emitUpdateState() {
@@ -297,19 +415,18 @@ function configureApplicationMenu() {
 }
 
 async function handleCheckForUpdatesMenuClick() {
-  const disabledReason = getAutoUpdateDisabledReason({
+  const disabledReason = getUpdateCheckDisabledReason({
     disabledByEnv: process.env.KICKSTART_DISABLE_AUTO_UPDATE === "1",
     hasUpdateRepository: resolveUpdateRepository().length > 0,
     isDevelopment: Boolean(getRendererDevServerUrl()),
     isPackaged: app.isPackaged,
-    platform: process.platform,
   });
 
   if (disabledReason) {
     await dialog.showMessageBox({
       buttons: ["OK"],
       detail: disabledReason,
-      message: "Automatic updates are not available right now.",
+      message: "Update checks are not available right now.",
       title: "Updates unavailable",
       type: "info",
     });
@@ -323,7 +440,7 @@ async function handleCheckForUpdatesMenuClick() {
 }
 
 async function checkForUpdates(reason: string): Promise<void> {
-  if (isQuitting || !updaterConfigured || updateCheckInFlight) {
+  if (isQuitting || !releaseChecksConfigured || updateCheckInFlight) {
     return;
   }
   if (updateState.status === "downloading" || updateState.status === "downloaded") {
@@ -341,6 +458,44 @@ async function checkForUpdates(reason: string): Promise<void> {
   });
 
   try {
+    if (updateState.updateMode === "manual") {
+      const repository = resolveUpdateRepositoryParts();
+      if (!repository) {
+        throw new Error("The GitHub repository for updates is invalid.");
+      }
+
+      const latestVersion = await fetchLatestReleaseVersion({
+        allowPrerelease: app.getVersion().includes("-"),
+        owner: repository.owner,
+        repo: repository.repo,
+      });
+
+      if (compareVersions(latestVersion, app.getVersion()) > 0) {
+        setUpdateState({
+          availableVersion: latestVersion,
+          canRetry: true,
+          checkedAt: new Date().toISOString(),
+          downloadedVersion: null,
+          downloadPercent: null,
+          errorContext: null,
+          message: `Kickstart ${latestVersion} is available. Download it from GitHub Releases.`,
+          status: "available",
+        });
+      } else {
+        setUpdateState({
+          availableVersion: null,
+          canRetry: false,
+          checkedAt: new Date().toISOString(),
+          downloadedVersion: null,
+          downloadPercent: null,
+          errorContext: null,
+          message: null,
+          status: "idle",
+        });
+      }
+      return;
+    }
+
     await autoUpdater.checkForUpdates();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -417,23 +572,26 @@ async function installDownloadedUpdate(): Promise<{ accepted: boolean; completed
 }
 
 function configureAutoUpdater() {
+  const updateMode = resolvePackagedUpdateMode();
+  const releaseChecksEnabled = shouldEnableReleaseChecks();
   const enabled = shouldEnableAutoUpdates();
+  updaterConfigured = false;
+  releaseChecksConfigured = false;
   setUpdateState({
-    ...createInitialDesktopUpdateState(app.getVersion()),
-    enabled,
-    message: enabled
+    ...createInitialDesktopUpdateState(app.getVersion(), updateMode),
+    enabled: releaseChecksEnabled,
+    message: releaseChecksEnabled
       ? null
-      : getAutoUpdateDisabledReason({
+      : getUpdateCheckDisabledReason({
           disabledByEnv: process.env.KICKSTART_DISABLE_AUTO_UPDATE === "1",
           hasUpdateRepository: resolveUpdateRepository().length > 0,
           isDevelopment: Boolean(getRendererDevServerUrl()),
           isPackaged: app.isPackaged,
-          platform: process.platform,
         }),
-    status: enabled ? "idle" : "disabled",
+    status: releaseChecksEnabled ? "idle" : "disabled",
   });
 
-  if (!enabled) {
+  if (!releaseChecksEnabled) {
     return;
   }
 
@@ -448,87 +606,91 @@ function configureAutoUpdater() {
     return;
   }
 
-  updaterConfigured = true;
-  autoUpdater.setFeedURL({
-    owner: repository.owner,
-    provider: "github",
-    repo: repository.repo,
-  });
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.allowPrerelease = app.getVersion().includes("-");
+  releaseChecksConfigured = true;
 
-  autoUpdater.on("update-available", (info) => {
-    setUpdateState({
-      availableVersion: info.version,
-      canRetry: true,
-      checkedAt: new Date().toISOString(),
-      downloadedVersion: null,
-      downloadPercent: null,
-      errorContext: null,
-      message: null,
-      status: "available",
+  if (enabled) {
+    updaterConfigured = true;
+    autoUpdater.setFeedURL({
+      owner: repository.owner,
+      provider: "github",
+      repo: repository.repo,
     });
-  });
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.allowPrerelease = app.getVersion().includes("-");
 
-  autoUpdater.on("update-not-available", () => {
-    setUpdateState({
-      availableVersion: null,
-      canRetry: false,
-      checkedAt: new Date().toISOString(),
-      downloadedVersion: null,
-      downloadPercent: null,
-      errorContext: null,
-      message: null,
-      status: "idle",
+    autoUpdater.on("update-available", (info) => {
+      setUpdateState({
+        availableVersion: info.version,
+        canRetry: true,
+        checkedAt: new Date().toISOString(),
+        downloadedVersion: null,
+        downloadPercent: null,
+        errorContext: null,
+        message: null,
+        status: "available",
+      });
     });
-  });
 
-  autoUpdater.on("download-progress", (progress) => {
-    setUpdateState({
-      downloadPercent: progress.percent,
-      message: null,
-      status: "downloading",
+    autoUpdater.on("update-not-available", () => {
+      setUpdateState({
+        availableVersion: null,
+        canRetry: false,
+        checkedAt: new Date().toISOString(),
+        downloadedVersion: null,
+        downloadPercent: null,
+        errorContext: null,
+        message: null,
+        status: "idle",
+      });
     });
-  });
 
-  autoUpdater.on("update-downloaded", (info) => {
-    updateDownloadInFlight = false;
-    setUpdateState({
-      availableVersion: info.version,
-      canRetry: false,
-      downloadedVersion: info.version,
-      downloadPercent: 100,
-      errorContext: null,
-      message: null,
-      status: "downloaded",
+    autoUpdater.on("download-progress", (progress) => {
+      setUpdateState({
+        downloadPercent: progress.percent,
+        message: null,
+        status: "downloading",
+      });
     });
-  });
 
-  autoUpdater.on("error", (error) => {
-    const errorContext = updateDownloadInFlight ? "download" : updateCheckInFlight ? "check" : null;
-    updateDownloadInFlight = false;
-    const message = error instanceof Error ? error.message : String(error);
-    setUpdateState({
-      canRetry: updateState.availableVersion !== null || updateState.downloadedVersion !== null,
-      checkedAt: new Date().toISOString(),
-      downloadPercent: null,
-      errorContext,
-      message,
-      status: "error",
+    autoUpdater.on("update-downloaded", (info) => {
+      updateDownloadInFlight = false;
+      setUpdateState({
+        availableVersion: info.version,
+        canRetry: false,
+        downloadedVersion: info.version,
+        downloadPercent: 100,
+        errorContext: null,
+        message: null,
+        status: "downloaded",
+      });
     });
-  });
 
-  autoUpdater.on("checking-for-update", () => {
-    setUpdateState({
-      canRetry: false,
-      checkedAt: new Date().toISOString(),
-      downloadPercent: null,
-      errorContext: null,
-      message: null,
-      status: "checking",
+    autoUpdater.on("error", (error) => {
+      const errorContext = updateDownloadInFlight ? "download" : updateCheckInFlight ? "check" : null;
+      updateDownloadInFlight = false;
+      const message = error instanceof Error ? error.message : String(error);
+      setUpdateState({
+        canRetry: updateState.availableVersion !== null || updateState.downloadedVersion !== null,
+        checkedAt: new Date().toISOString(),
+        downloadPercent: null,
+        errorContext,
+        message,
+        status: "error",
+      });
     });
-  });
+
+    autoUpdater.on("checking-for-update", () => {
+      setUpdateState({
+        canRetry: false,
+        checkedAt: new Date().toISOString(),
+        downloadPercent: null,
+        errorContext: null,
+        message: null,
+        status: "checking",
+      });
+    });
+  }
 
   clearUpdatePollTimer();
   updateStartupTimer = setTimeout(() => {
@@ -856,7 +1018,7 @@ function registerIpcHandlers() {
   ipcMain.handle(UPDATE_CHECK_CHANNEL, async () => {
     await checkForUpdates("renderer");
     return {
-      accepted: updaterConfigured,
+      accepted: releaseChecksConfigured,
       completed: updateState.status !== "checking",
       state: updateState,
     } satisfies DesktopUpdateActionResult;
@@ -915,6 +1077,20 @@ function registerIpcHandlers() {
       });
     },
   );
+
+  ipcMain.handle("kickstart:open-external-url", async (_event, rawUrl: string) => {
+    const url = typeof rawUrl === "string" ? rawUrl.trim() : "";
+    if (!url) {
+      throw new Error("A URL is required.");
+    }
+
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new Error("Only http and https URLs are allowed.");
+    }
+
+    await shell.openExternal(parsed.toString());
+  });
 
   ipcMain.handle("kickstart:create-project", async (_event, input: CreateProjectInput) => {
     const projectName = path.basename(input.path);

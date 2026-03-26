@@ -2,10 +2,11 @@
 
 import { AppleIcon, GitHubIcon } from "@/components/icons"
 import Image from "next/image"
+import Link from "next/link"
 import { useEffect, useState } from "react"
 
 import { Button } from "@/components/ui/button"
-import { TrackedDownloadLink } from "@/components/tracked-download-link"
+import { DownloadButton } from "@/components/download-dialog-button"
 import { cn } from "@/lib/utils"
 import wordmarkPng from "@kickstart/assets/src/wordmark.png"
 
@@ -27,11 +28,13 @@ export function Navbar() {
           scrolled ? "bg-muted backdrop-blur-md" : "bg-transparent"
         )}
       >
-        <Image
-          src={wordmarkPng}
-          alt="Kickstart"
-          className="h-5 w-auto"
-        />
+        <Link href="/">
+          <Image
+            src={wordmarkPng}
+            alt="Kickstart"
+            className="h-5 w-auto"
+          />
+        </Link>
         <div className="flex items-center gap-2">
           <Button
             variant="ghost"
@@ -46,18 +49,10 @@ export function Navbar() {
           >
             <GitHubIcon className="size-4" />
           </Button>
-          <Button
-            size="sm"
-            render={
-              <TrackedDownloadLink
-                href="https://github.com/paukraft/kickstart/releases/latest"
-                location="navbar"
-              />
-            }
-          >
+          <DownloadButton size="sm">
             <AppleIcon className="size-4" />
             Download for macOS
-          </Button>
+          </DownloadButton>
         </div>
       </nav>
     </div>

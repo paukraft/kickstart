@@ -244,6 +244,9 @@ function stageDesktopApp(stageDir, options) {
     main: "dist-electron/main.js",
     productName: desktopPackageJson.productName ?? "Kickstart",
     author: "paukraft",
+    kickstart: {
+      updateMode: options.signed ? "auto" : "manual",
+    },
     build: createBuildConfig(options),
     dependencies: {
       ...desktopPackageJson.dependencies,

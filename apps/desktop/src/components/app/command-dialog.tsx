@@ -11,8 +11,14 @@ import {
 import type { ComponentType } from "react";
 import { useForm } from "react-hook-form";
 
-import type { CommandConfig, EditableCommandConfig } from "@kickstart/contracts";
-import { deriveCommandId, isActionCommand, normalizeCommandBehavior } from "@kickstart/contracts";
+import type { CommandConfig, EditableCommandConfig, SoundId } from "@kickstart/contracts";
+import {
+  deriveCommandId,
+  isActionCommand,
+  normalizeCommandBehavior,
+} from "@kickstart/contracts";
+
+import { playSound, SOUND_OPTIONS } from "@/lib/sounds";
 
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -36,6 +42,7 @@ interface CommandDraft {
   cwd: string;
   envText: string;
   name: string;
+  soundId: SoundId | null;
   startMode: CommandConfig["startMode"];
   type: CommandConfig["type"];
 }
@@ -45,9 +52,11 @@ interface NormalizedCommandDraft {
   cwd: string;
   envText: string;
   name: string;
+  soundId: SoundId | null;
   startMode: CommandConfig["startMode"];
   type: CommandConfig["type"];
 }
+
 
 function createDraft(command?: EditableCommandConfig | null): CommandDraft {
   return {
@@ -55,6 +64,7 @@ function createDraft(command?: EditableCommandConfig | null): CommandDraft {
     cwd: command?.cwd ?? ".",
     envText: envRecordToText(command?.env),
     name: command?.name ?? "",
+    soundId: command?.soundId ?? null,
     startMode: command?.startMode ?? "manual",
     type: command?.type ?? "service",
   };
@@ -76,6 +86,7 @@ function normalizeDraft(draft: CommandDraft): NormalizedCommandDraft {
       .filter(Boolean)
       .join("\n"),
     name: draft.name.trim(),
+    soundId: behavior.type === "action" ? draft.soundId : null,
     startMode: behavior.startMode,
     type: behavior.type,
   };
@@ -270,6 +281,37 @@ function CommandFormView({
             }}
           />
         )}
+        {isAction && (
+          <div>
+            <Label className="mb-1.5 block text-xs text-muted-foreground">Completion sound</Label>
+            <div className="flex rounded-lg border border-border p-0.5">
+              {SOUND_OPTIONS.map((option) => {
+                const active = option.id === (draft.soundId ?? null);
+                return (
+                  <button
+                    key={option.id ?? "none"}
+                    type="button"
+                    className={cn(
+                      "flex-1 rounded-md px-3 py-1 transition-colors",
+                      active
+                        ? "bg-secondary text-secondary-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                    onClick={() => {
+                      form.setValue("soundId", option.id, { shouldDirty: true });
+                      if (option.id) playSound(option.id);
+                    }}
+                  >
+                    <div className="flex items-center justify-center gap-1.5">
+                      <option.icon className="size-3.5" />
+                      <p className="text-sm font-medium">{option.label}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <details className="group">
           <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
             Advanced
@@ -421,6 +463,7 @@ export function CommandDialog({
           ? currentCommand.id
           : deriveCommandId(normalizedDraft.command, normalizedDraft.cwd),
         ...(normalizedDraft.name ? { name: normalizedDraft.name } : {}),
+        soundId: normalizedDraft.soundId,
         startMode: normalizedDraft.startMode,
         type: normalizedDraft.type,
       });

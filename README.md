@@ -46,6 +46,20 @@ bun run build
 ## Releases
 
 - GitHub releases: <https://github.com/paukraft/kickstart/releases>
+- Unsigned macOS installs currently use a manual download/update flow.
+- To publish an unsigned macOS build to GitHub Releases:
+
+```bash
+bun install
+bun run lint
+bun run test
+bun run typecheck
+node scripts/build-desktop-artifact.mjs --platform darwin --publish always
+```
+
+- Tag the desktop version before publishing, for example `v0.1.0`.
+- Users install the latest `.dmg` from GitHub Releases and may need to use Finder `Open` once to bypass the unsigned app warning.
+- Automatic in-app updates are disabled for unsigned builds until Apple signing/notarization is set up.
 - Marketing site source: `apps/marketing`
 - Desktop app source: `apps/desktop`
 

@@ -37,6 +37,10 @@ const items = [
     q: "macOS only?",
     a: "Right now, yes. Linux and Windows are planned later.",
   },
+  {
+    q: "Why is the app unsigned?",
+    a: "Signing a macOS app costs $99/year — I've decided against paying that for now, but if Kickstart gets some traction I'll consider it. No worries though, everything works the same, installation just takes a few seconds longer. Try opening the app, then go to System Settings > Privacy & Security and click Open Anyway.",
+  },
 ]
 
 export function FAQ() {

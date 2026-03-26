@@ -94,7 +94,12 @@ export function MainContent({
     );
   }
 
-  const shortcuts = [
+  const shortcuts: {
+    label: string;
+    keys: string;
+    action: (() => void) | undefined;
+    icon?: React.ReactNode;
+  }[] = [
     { label: "Project command menu", keys: "Cmd+K", action: undefined },
     { label: "New shell tab", keys: "Cmd+T", action: onCreateShellTab },
     { label: "Add project", keys: "Cmd+O", action: onAddProject },
@@ -125,9 +130,11 @@ export function MainContent({
               onClick={shortcut.action}
             >
               <span>{shortcut.label}</span>
-              <kbd className="font-mono text-[11px] opacity-60">
-                {shortcut.keys}
-              </kbd>
+              {shortcut.icon ?? (
+                <kbd className="font-mono text-[11px] opacity-60">
+                  {shortcut.keys}
+                </kbd>
+              )}
             </button>
           ))}
         </div>

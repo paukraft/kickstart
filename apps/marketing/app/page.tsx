@@ -1,18 +1,15 @@
 import { AppleIcon, GitHubIcon } from "@/components/icons"
 import Image from "next/image"
 
-import { Navbar } from "@/components/navbar"
-import { TrackedDownloadLink } from "@/components/tracked-download-link"
+import { DownloadButton } from "@/components/download-dialog-button"
 import { Button } from "@/components/ui/button"
 import logoPng from "@kickstart/assets/src/logo.png"
-import wordmarkPng from "@kickstart/assets/src/wordmark.png"
 import { FAQ } from "./faq"
 import { Features } from "./features"
 
 export default function Page() {
   return (
-    <div className="flex min-h-svh flex-col overflow-x-clip">
-      <Navbar />
+    <>
 
       {/* Hero */}
       <div className="mx-auto mt-8 w-full max-w-5xl px-6 md:mt-16">
@@ -36,18 +33,10 @@ export default function Page() {
             and always know what&apos;s running where.
           </p>
           <div className="relative mt-8 flex items-center gap-3">
-            <Button
-              size="lg"
-              render={
-                <TrackedDownloadLink
-                  href="https://github.com/paukraft/kickstart/releases/latest"
-                  location="hero"
-                />
-              }
-            >
+            <DownloadButton size="lg">
               <AppleIcon className="size-5" />
               Download for macOS
-            </Button>
+            </DownloadButton>
             <Button
               variant="ghost"
               size="lg"
@@ -134,29 +123,6 @@ export default function Page() {
         <FAQ />
       </div>
 
-      {/* Footer */}
-      <footer className="mx-auto w-full max-w-5xl px-6 py-16 text-center">
-        <Image
-          src={wordmarkPng}
-          alt="Kickstart"
-          className="mx-auto w-64 md:w-96"
-        />
-        <p className="mt-4 text-sm text-muted-foreground">
-          <a
-            href="https://github.com/paukraft/kickstart"
-            className="transition-colors hover:text-foreground"
-          >
-            Free and open source under MIT.
-          </a>
-          {" · Built by "}
-          <a
-            href="https://paukraft.com"
-            className="transition-colors hover:text-foreground"
-          >
-            Pau Kraft
-          </a>
-        </p>
-      </footer>
-    </div>
+    </>
   )
 }

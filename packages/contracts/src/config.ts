@@ -27,31 +27,30 @@ export const commandEnvironmentSchema = z.record(
 
 export const commandTypeSchema = z.enum(["service", "action"]);
 export const commandStartModeSchema = z.enum(["auto", "manual"]);
+export const soundIdSchema = z.enum(["neutral", "happy"]);
+export const SOUND_IDS = soundIdSchema.options;
+export const commandIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(COMMAND_ID_MAX_LENGTH)
+  .regex(/^[a-z0-9-]+$/);
+export const commandNameSchema = z.string().trim().min(1).max(80);
 
 export const persistedCommandConfigSchema = z.object({
   command: z.string().trim().min(1),
   cwd: z.string().trim().min(1).default("."),
   env: commandEnvironmentSchema.optional(),
-  id: z
-    .string()
-    .trim()
-    .min(1)
-    .max(COMMAND_ID_MAX_LENGTH)
-    .regex(/^[a-z0-9-]+$/)
-    .optional(),
-  name: z.string().trim().min(1).max(80).optional(),
+  id: commandIdSchema.optional(),
+  name: commandNameSchema.optional(),
+  soundId: soundIdSchema.nullable().optional(),
   type: commandTypeSchema.default("service"),
   startMode: commandStartModeSchema.default("manual"),
 });
 
 export const commandConfigSchema = persistedCommandConfigSchema.extend({
-  id: z
-    .string()
-    .trim()
-    .min(1)
-    .max(COMMAND_ID_MAX_LENGTH)
-    .regex(/^[a-z0-9-]+$/),
-  name: z.string().trim().min(1).max(80),
+  id: commandIdSchema,
+  name: commandNameSchema,
 });
 
 export const persistedKickstartConfigSchema = z.object({
@@ -62,21 +61,25 @@ export const kickstartConfigSchema = z.object({
   commands: z.array(commandConfigSchema).default([]),
 });
 
+export const editableCommandConfigSchema = persistedCommandConfigSchema.extend({
+  id: commandIdSchema,
+  type: commandTypeSchema,
+  startMode: commandStartModeSchema,
+});
+
+export const editableKickstartConfigSchema = z.object({
+  commands: z.array(editableCommandConfigSchema).default([]),
+});
+
 export type PersistedCommandConfig = z.infer<typeof persistedCommandConfigSchema>;
 export type CommandConfig = z.infer<typeof commandConfigSchema>;
-export interface EditableCommandConfig
-  extends Omit<PersistedCommandConfig, "id" | "startMode" | "type"> {
-  id: string;
-  startMode: CommandStartMode;
-  type: CommandType;
-}
-export interface EditableKickstartConfig {
-  commands: EditableCommandConfig[];
-}
+export type EditableCommandConfig = z.infer<typeof editableCommandConfigSchema>;
+export type EditableKickstartConfig = z.infer<typeof editableKickstartConfigSchema>;
 export type PersistedKickstartConfig = z.infer<typeof persistedKickstartConfigSchema>;
 export type KickstartConfig = z.infer<typeof kickstartConfigSchema>;
 export type CommandType = z.infer<typeof commandTypeSchema>;
 export type CommandStartMode = z.infer<typeof commandStartModeSchema>;
+export type SoundId = z.infer<typeof soundIdSchema>;
 
 type CommandBehavior = Pick<PersistedCommandConfig, "startMode" | "type">;
 

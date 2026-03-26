@@ -81,6 +81,7 @@ describe("config mutations", () => {
       cwd: ".",
       id: "bun-test-watch",
       name: "Tests",
+      soundId: "happy",
       startMode: "manual",
       type: "action",
     });
@@ -90,6 +91,7 @@ describe("config mutations", () => {
     expect(config.commands.map((command) => command.id)).toEqual(["bun-test-watch"]);
     expect(stringifyKickstartConfig(config)).toContain("\"id\": \"bun-test-watch\"");
     expect(stringifyKickstartConfig(config)).not.toContain("\"cwd\"");
+    expect(stringifyKickstartConfig(config)).toContain("\"soundId\": \"happy\"");
     expect(stringifyKickstartConfig(config)).toContain("\"type\": \"action\"");
     expect(stringifyKickstartConfig(config)).not.toContain("\"startMode\": \"manual\"");
   });
@@ -156,5 +158,21 @@ describe("config mutations", () => {
       startMode: "manual",
       type: "action",
     });
+  });
+
+  it("omits empty action sounds from persisted config", () => {
+    const config = normalizeKickstartConfig({
+      commands: [
+        {
+          command: "bun test",
+          cwd: ".",
+          id: "test",
+          soundId: null,
+          type: "action",
+        },
+      ],
+    });
+
+    expect(stringifyKickstartConfig(config)).not.toContain("\"soundId\"");
   });
 });

@@ -42,6 +42,7 @@ export type DesktopUpdateStatus =
   | "disabled";
 
 export type DesktopUpdateErrorContext = "check" | "download" | "install" | null;
+export type DesktopUpdateMode = "auto" | "manual";
 
 export interface DesktopUpdateState {
   availableVersion: string | null;
@@ -54,6 +55,7 @@ export interface DesktopUpdateState {
   errorContext: DesktopUpdateErrorContext;
   message: string | null;
   status: DesktopUpdateStatus;
+  updateMode: DesktopUpdateMode;
 }
 
 export interface DesktopUpdateActionResult {
@@ -183,6 +185,7 @@ export interface DesktopBridge {
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   openTerminal: (input: TerminalOpenInput) => Promise<TerminalSessionSnapshot | null>;
   openInEditor: (path: string, editorId: EditorId) => Promise<void>;
+  openExternalUrl: (url: string) => Promise<void>;
   onUpdateState: (
     listener: (state: DesktopUpdateState) => void,
   ) => () => void;

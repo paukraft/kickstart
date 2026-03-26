@@ -10,6 +10,8 @@ import {
   type PersistedCommandConfig,
   deriveCommandId,
   deriveCommandName,
+  editableKickstartConfigSchema,
+  kickstartConfigSchema,
   normalizeCommandBehavior,
   normalizeCommandId,
   persistedKickstartConfigSchema,
@@ -40,30 +42,6 @@ function nextAvailableCommandId(commandId: string, used: ReadonlySet<string>, st
   }
 }
 
-function hydrateCommands(commands: PersistedCommandConfig[]): CommandConfig[] {
-  const used = new Set<string>();
-  const signatureCounts = new Map<string, number>();
-  return commands.map((command) => {
-    const normalizedCommand = normalizeCommandBehavior(command);
-    const signature = commandSignature(normalizedCommand);
-    const occurrence = (signatureCounts.get(signature) ?? 0) + 1;
-    signatureCounts.set(signature, occurrence);
-    const baseId = normalizeCommandId(
-      normalizedCommand.id ?? deriveCommandId(normalizedCommand.command, normalizedCommand.cwd),
-    );
-    const nextId =
-      occurrence === 1
-        ? nextAvailableCommandId(baseId, used)
-        : nextAvailableCommandId(appendCommandIdSuffix(baseId, occurrence), used, occurrence + 1);
-    used.add(nextId);
-    return {
-      ...normalizedCommand,
-      id: nextId,
-      name: normalizedCommand.name ?? deriveCommandName(normalizedCommand.command),
-    };
-  });
-}
-
 function hydrateEditableCommands(commands: PersistedCommandConfig[]): EditableCommandConfig[] {
   const used = new Set<string>();
   const signatureCounts = new Map<string, number>();
@@ -87,18 +65,25 @@ function hydrateEditableCommands(commands: PersistedCommandConfig[]): EditableCo
   });
 }
 
+function hydrateCommands(commands: PersistedCommandConfig[]): CommandConfig[] {
+  return hydrateEditableCommands(commands).map((command) => ({
+    ...command,
+    name: command.name ?? deriveCommandName(command.command),
+  }));
+}
+
 export function hydrateEditableKickstartConfig(input: unknown): EditableKickstartConfig {
   const parsed = persistedKickstartConfigSchema.parse(input);
-  return {
+  return editableKickstartConfigSchema.parse({
     commands: hydrateEditableCommands(parsed.commands),
-  };
+  });
 }
 
 export function normalizeKickstartConfig(input: unknown): KickstartConfig {
   const parsed = persistedKickstartConfigSchema.parse(input);
-  return {
+  return kickstartConfigSchema.parse({
     commands: hydrateCommands(parsed.commands),
-  };
+  });
 }
 
 export function createEmptyKickstartConfig(): KickstartConfig {
@@ -129,6 +114,9 @@ export function stringifyKickstartConfig(input: KickstartConfig): string {
       ...(command.env ? { env: command.env } : {}),
       id: _id,
       ...(command.name !== deriveCommandName(command.command) ? { name: command.name } : {}),
+      ...(command.soundId !== null && command.soundId !== undefined
+        ? { soundId: command.soundId }
+        : {}),
       ...(command.type !== "service" ? { type: command.type } : {}),
       ...(command.startMode !== "manual" ? { startMode: command.startMode } : {}),
     })),
