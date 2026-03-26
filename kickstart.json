@@ -13,6 +13,13 @@
       "type": "action"
     },
     {
+      "command": "bun run publish:desktop:mac",
+      "id": "command-bun-run-publish-desktop-mac",
+      "name": "publish mac release",
+      "soundId": "happy",
+      "type": "action"
+    },
+    {
       "command": "bun install",
       "id": "command-bun-install",
       "soundId": "happy",

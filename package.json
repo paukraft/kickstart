@@ -26,6 +26,7 @@
     "dist:desktop:win": "node scripts/build-desktop-artifact.mjs --platform win32",
     "lint": "turbo run lint",
     "release:desktop:mac": "node scripts/release-desktop-mac.mjs",
+    "publish:desktop:mac": "node scripts/release-desktop-mac.mjs",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck"
   },

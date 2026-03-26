@@ -1,10 +1,10 @@
 import type { Metadata } from "next"
-import { OpenPanelComponent } from "@openpanel/nextjs"
 import { JetBrains_Mono, Manrope } from "next/font/google"
 import Image from "next/image"
 
 import "./globals.css"
 import { Navbar } from "@/components/navbar"
+import { TrackiTrack } from "@/components/tracki-track"
 import { ThemeProvider } from "@/components/theme-provider"
 import { cn } from "@/lib/utils"
 import wordmarkPng from "@kickstart/assets/src/wordmark.png"
@@ -22,8 +22,6 @@ export const metadata: Metadata = {
     "Add repos, pin dev commands, and keep every terminal tab durable across restarts.",
 }
 
-const openPanelClientId = process.env.OPENPANEL_CLIENT_ID
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -36,15 +34,7 @@ export default function RootLayout({
       className={cn("antialiased", fontMono.variable, "font-sans", manrope.variable)}
     >
       <body>
-        {openPanelClientId ? (
-          <OpenPanelComponent
-            apiUrl="/api/op"
-            clientId={openPanelClientId}
-            scriptUrl="/api/op/op1.js"
-            trackScreenViews={true}
-            trackOutgoingLinks={true}
-          />
-        ) : null}
+        <TrackiTrack />
         <ThemeProvider>
           <div className="flex min-h-svh flex-col overflow-x-clip">
             <Navbar />
