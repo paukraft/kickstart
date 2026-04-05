@@ -1,4 +1,9 @@
-import type { EditableCommandConfig, EditableKickstartConfig } from "./config";
+import type {
+  CommandSource,
+  EditableCommandConfig,
+  EditableKickstartConfig,
+  EffectiveCommandId,
+} from "./config";
 import type {
   ProjectGroupRecord,
   ProjectTabRecord,
@@ -19,8 +24,21 @@ import type {
 
 export const EDITOR_OPTIONS = [
   { command: "cursor", id: "cursor", label: "Cursor" },
+  { args: ["app"], command: "codex", id: "codex", label: "Codex" },
+  { command: "windsurf", id: "windsurf", label: "Windsurf" },
   { command: "code", id: "vscode", label: "VS Code" },
   { command: "zed", id: "zed", label: "Zed" },
+  { command: "idea", id: "intellij", label: "IntelliJ IDEA" },
+  { command: "webstorm", id: "webstorm", label: "WebStorm" },
+  { command: "pycharm", id: "pycharm", label: "PyCharm" },
+  { command: "goland", id: "goland", label: "GoLand" },
+  { command: "phpstorm", id: "phpstorm", label: "PhpStorm" },
+  { command: "rubymine", id: "rubymine", label: "RubyMine" },
+  { command: "clion", id: "clion", label: "CLion" },
+  { command: "rider", id: "rider", label: "Rider" },
+  { command: "studio", id: "android-studio", label: "Android Studio" },
+  { command: "subl", id: "sublime-text", label: "Sublime Text" },
+  { command: "nova", id: "nova", label: "Nova" },
   { command: null, id: "file-manager", label: "File Manager" },
 ] as const;
 
@@ -90,10 +108,15 @@ export interface CreateProjectInput {
 export interface UpsertCommandInput {
   command: EditableCommandConfig;
   projectId: string;
+  source: CommandSource;
+}
+
+export interface UpdateCommandInput extends UpsertCommandInput {
+  existingCommandId: EffectiveCommandId;
 }
 
 export interface DeleteCommandInput {
-  commandId: string;
+  commandId: EffectiveCommandId;
   projectId: string;
 }
 
@@ -107,7 +130,7 @@ export interface ReorderTabsInput {
 }
 
 export interface ReorderCommandsInput {
-  commandIds: string[];
+  commandIds: EffectiveCommandId[];
   projectId: string;
 }
 
@@ -148,17 +171,23 @@ export interface ReorderProjectsInGroupInput {
   projectIds: string[];
 }
 
-export interface ProjectConfigPayload {
+export interface ProjectConfigSourcePayload {
   config: EditableKickstartConfig | null;
   configError?: string | null;
   configExists: boolean;
 }
 
+export interface ProjectConfigPayload {
+  hasCommands: boolean;
+  local: ProjectConfigSourcePayload;
+  shared: ProjectConfigSourcePayload;
+}
+
 export interface ConfigChangedPayload {
-  config: EditableKickstartConfig | null;
-  configError?: string | null;
-  configExists: boolean;
+  hasCommands: boolean;
+  local: ProjectConfigSourcePayload;
   projectId: string;
+  shared: ProjectConfigSourcePayload;
   tabs: ProjectTabRecord[];
 }
 
@@ -207,7 +236,7 @@ export interface DesktopBridge {
   terminalClose: (input: TerminalCloseInput) => Promise<void>;
   terminalResize: (input: TerminalResizeInput) => Promise<void>;
   terminalWrite: (input: TerminalWriteInput) => Promise<void>;
-  updateCommand: (input: UpsertCommandInput) => Promise<ProjectConfigPayload>;
+  updateCommand: (input: UpdateCommandInput) => Promise<ProjectConfigPayload>;
   watchShortcutActions: (
     listener: (actionId: ShortcutActionId) => void,
   ) => () => void;

@@ -7,6 +7,7 @@ Stop juggling terminal windows. Keep your local dev commands organized by repo, 
 ## What It Does
 
 - Start a whole project from a saved `kickstart.json`
+- Keep personal-only commands in the app without touching the repo config
 - Run one service or launch every command a project needs
 - Open temporary shells without turning your desktop into terminal soup
 - Switch between repos without losing terminal state or the directory each shell was in

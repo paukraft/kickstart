@@ -1,11 +1,19 @@
-import type { CommandConfig, ProjectTabRecord } from "@kickstart/contracts";
+import {
+  createCommandTabId,
+  type ProjectTabRecord,
+  type ResolvedCommandConfig,
+} from "@kickstart/contracts";
 
-function createCommandTab(projectId: string, command: CommandConfig, index: number): ProjectTabRecord {
+function createCommandTab(
+  projectId: string,
+  command: ResolvedCommandConfig,
+  index: number,
+): ProjectTabRecord {
   const timestamp = new Date().toISOString();
   return {
     commandId: command.id,
     createdAt: timestamp,
-    id: `command:${command.id}`,
+    id: createCommandTabId(command.id),
     kind: "command",
     projectId,
     shellCwd: command.cwd,
@@ -17,17 +25,17 @@ function createCommandTab(projectId: string, command: CommandConfig, index: numb
 
 export function mergeProjectTabs(
   projectId: string,
-  commands: CommandConfig[],
+  commands: ResolvedCommandConfig[],
   existingTabs: ProjectTabRecord[],
   runningTabIds: ReadonlySet<string> = new Set(),
 ): ProjectTabRecord[] {
   const timestamp = new Date().toISOString();
-  const commandIds = new Set(commands.map((command) => command.id));
+  const commandIds = new Set<string>(commands.map((command) => command.id));
   const existingTabsById = new Map(existingTabs.map((tab) => [tab.id, tab]));
   const restoredCommandTabIds = new Set<string>();
 
   const commandTabs = commands.map((command, index) => {
-    const tabId = `command:${command.id}`;
+    const tabId = createCommandTabId(command.id);
     const existing = existingTabsById.get(tabId);
     if (!existing) {
       return createCommandTab(projectId, command, index);

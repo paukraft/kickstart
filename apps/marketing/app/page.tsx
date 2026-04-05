@@ -2,6 +2,7 @@ import { AppleIcon, GitHubIcon } from "@/components/icons"
 import Image from "next/image"
 
 import { DownloadButton } from "@/components/download-dialog-button"
+import { HeroVideo } from "@/components/hero-video"
 import { Button } from "@/components/ui/button"
 import logoPng from "@kickstart/assets/src/logo.png"
 import { FAQ } from "./faq"
@@ -25,12 +26,17 @@ export default function Page() {
                 "radial-gradient(ellipse 60% 60% at 70% 70%, black 20%, transparent 70%)",
             }}
           />
-          <h1 className="relative max-w-lg text-4xl font-bold tracking-tight md:max-w-2xl md:text-6xl">
-            Your command center for local dev.
+          <p className="relative text-sm font-medium uppercase tracking-widest text-muted-foreground">
+            Desktop app for developers
+          </p>
+          <h1 className="relative mt-3 max-w-lg text-4xl font-bold tracking-tight md:max-w-2xl md:text-6xl">
+            Stop losing track of your terminals.
           </h1>
           <p className="relative mt-4 max-w-md text-lg text-muted-foreground md:max-w-xl md:text-xl">
-            Pin commands to each repo, start everything at once,
-            and always know what&apos;s running where.
+            Organized like the Discord app. Repos are servers, terminals
+            are channels. One click to run{" "}
+            <mark className="rounded bg-foreground/10 px-1 text-inherit">npm run dev</mark>{" "}
+            and everything else your project needs.
           </p>
           <div className="relative mt-8 flex items-center gap-3">
             <DownloadButton size="lg">
@@ -55,6 +61,13 @@ export default function Page() {
           <p className="relative mt-4 text-sm text-muted-foreground">
             Free and open source. MIT license.
           </p>
+        </div>
+      </div>
+
+      {/* App preview */}
+      <div className="mx-auto mt-4 w-full max-w-5xl px-6 md:mt-6">
+        <div className="overflow-hidden rounded-2xl bg-muted md:rounded-3xl" style={{ aspectRatio: "16/10" }}>
+          <HeroVideo src="/start-project.mp4" />
         </div>
       </div>
 
@@ -84,12 +97,14 @@ export default function Page() {
             <div className="mb-4 flex size-10 items-center justify-center rounded-full bg-muted text-lg font-bold">
               3
             </div>
-            <h3 className="text-lg font-semibold">Set up your commands</h3>
+            <h3 className="text-lg font-semibold">Tell it what to run</h3>
             <p className="mt-2 text-muted-foreground">
-              A quick wizard walks you through it. Kickstart saves everything
-              to a{" "}
-              <code className="rounded bg-muted px-1.5 py-0.5 text-sm">kickstart.json</code>{" "}
-              in your repo, your whole team gets the same setup.
+              Add the commands each project needs, like{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-sm">npm run dev</code>
+              {" "}or{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-sm">docker compose up</code>.
+              Share them with your team via the repo, or keep them
+              local to your machine.
             </p>
           </div>
         </div>

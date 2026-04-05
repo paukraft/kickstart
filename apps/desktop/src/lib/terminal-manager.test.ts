@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.fn();
 
@@ -8,6 +12,21 @@ vi.mock("node-pty", () => ({
 
 import { resolveShellTabCwd } from "./terminal-manager";
 import { TerminalManager } from "./terminal-manager";
+
+const cleanupPaths = new Set<string>();
+
+afterEach(() => {
+  for (const target of cleanupPaths) {
+    fs.rmSync(target, { force: true, recursive: true });
+  }
+  cleanupPaths.clear();
+});
+
+function createHistoryDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kickstart-terminal-manager-"));
+  cleanupPaths.add(dir);
+  return dir;
+}
 
 function createTab(kind: "command" | "shell" = "shell") {
   const timestamp = new Date().toISOString();
@@ -349,5 +368,142 @@ describe("TerminalManager.open", () => {
     expect(killMock).toHaveBeenCalledOnce();
 
     signalKillMock.mockRestore();
+  });
+
+  it("moves a live session to a new command tab id", async () => {
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => ({
+      kill: vi.fn(),
+      onData: vi.fn(),
+      onExit: vi.fn(),
+      pid: 123,
+      resize: vi.fn(),
+      write: vi.fn(),
+    }));
+
+    const historyDir = createHistoryDir();
+    const manager = new TerminalManager({
+      historyDir,
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async (_projectId, tabId) => ({
+        commandId: tabId.replace("command:", ""),
+        createdAt: "",
+        id: tabId,
+        kind: "command",
+        projectId: "project-1",
+        shellCwd: ".",
+        sortOrder: 0,
+        title: "Dev",
+        updatedAt: "",
+      }),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "command:shared:dev",
+    });
+
+    await manager.moveSessionTab("project-1", "command:shared:dev", "command:local:dev");
+
+    expect(await manager.getSession("project-1", "command:shared:dev")).toBeNull();
+    expect(await manager.getSession("project-1", "command:local:dev")).toMatchObject({
+      projectId: "project-1",
+      tabId: "command:local:dev",
+    });
+  });
+
+  it("moves persisted history even when no session is loaded", async () => {
+    const historyDir = createHistoryDir();
+    const manager = new TerminalManager({
+      historyDir,
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async (_projectId, tabId) => ({
+        commandId: tabId.replace("command:", ""),
+        createdAt: "",
+        id: tabId,
+        kind: "command",
+        projectId: "project-1",
+        shellCwd: ".",
+        sortOrder: 0,
+        title: "Dev",
+        updatedAt: "",
+      }),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    const previousHistoryPath = path.join(historyDir, "project-1_command:shared:dev.log");
+    const nextHistoryPath = path.join(historyDir, "project-1_command:local:dev.log");
+    fs.writeFileSync(previousHistoryPath, "echo hello\n", "utf8");
+
+    await manager.moveSessionTab("project-1", "command:shared:dev", "command:local:dev");
+
+    expect(fs.existsSync(previousHistoryPath)).toBe(false);
+    expect(fs.readFileSync(nextHistoryPath, "utf8")).toBe("echo hello\n");
+    expect(await manager.getSession("project-1", "command:local:dev")).toBeNull();
+  });
+
+  it("migrates command history from legacy tab ids in bulk", async () => {
+    const historyDir = createHistoryDir();
+    const manager = new TerminalManager({
+      historyDir,
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async (_projectId, tabId) => ({
+        commandId: tabId.replace("command:", ""),
+        createdAt: "",
+        id: tabId,
+        kind: "command",
+        projectId: "project-1",
+        shellCwd: ".",
+        sortOrder: 0,
+        title: "Dev",
+        updatedAt: "",
+      }),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    const previousHistoryPath = path.join(historyDir, "project-1_command:dev.log");
+    const nextHistoryPath = path.join(historyDir, "project-1_command:shared:dev.log");
+    fs.writeFileSync(previousHistoryPath, "echo legacy\n", "utf8");
+
+    await manager.migrateCommandHistoryTabIds([
+      {
+        nextTabId: "command:shared:dev",
+        previousTabId: "command:dev",
+        projectId: "project-1",
+      },
+    ]);
+
+    expect(fs.existsSync(previousHistoryPath)).toBe(false);
+    expect(fs.readFileSync(nextHistoryPath, "utf8")).toBe("echo legacy\n");
   });
 });

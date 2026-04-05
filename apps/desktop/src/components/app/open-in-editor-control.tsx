@@ -1,10 +1,18 @@
-import { RiArrowDownSLine, RiFolderOpenLine } from "@remixicon/react";
+import {
+  RiAndroidLine,
+  RiArrowDownSLine,
+  RiBracesLine,
+  RiFolderOpenLine,
+  RiShapesLine,
+  RiWindyLine,
+} from "@remixicon/react";
 import type { ComponentType } from "react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { EditorId, EditorOption } from "@/lib/editors";
 
 import {
+  CodexIcon,
   CursorIcon,
   VisualStudioCodeIcon,
   ZedIcon,
@@ -26,9 +34,22 @@ function readStoredEditor() {
 }
 
 const editorIcons: Record<EditorId, ComponentType<{ className?: string }>> = {
+  "android-studio": RiAndroidLine,
+  clion: RiBracesLine,
   cursor: CursorIcon,
+  codex: CodexIcon,
   "file-manager": RiFolderOpenLine,
+  goland: RiBracesLine,
+  intellij: RiBracesLine,
+  nova: RiShapesLine,
+  phpstorm: RiBracesLine,
+  pycharm: RiBracesLine,
+  rider: RiBracesLine,
+  rubymine: RiBracesLine,
+  "sublime-text": RiShapesLine,
   vscode: VisualStudioCodeIcon,
+  webstorm: RiBracesLine,
+  windsurf: RiWindyLine,
   zed: ZedIcon,
 };
 

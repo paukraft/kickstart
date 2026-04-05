@@ -1,25 +1,33 @@
 import { describe, expect, it } from "vitest";
 
-import type { CommandConfig, ProjectTabRecord } from "@kickstart/contracts";
+import {
+  createCommandTabId,
+  createEffectiveCommandId,
+  type ProjectTabRecord,
+  type ResolvedCommandConfig,
+} from "@kickstart/contracts";
 
 import { mergeProjectTabs } from "./tabs";
 
-function createCommand(commandId: string, name = "Dev"): CommandConfig {
+function createCommand(commandId: string, name = "Dev"): ResolvedCommandConfig {
   return {
     command: "bun dev",
     cwd: ".",
-    id: commandId,
+    id: createEffectiveCommandId("shared", commandId),
     name,
+    source: "shared",
+    sourceCommandId: commandId,
     startMode: "manual",
     type: "service",
   };
 }
 
 function createCommandTab(commandId: string): ProjectTabRecord {
+  const effectiveCommandId = createEffectiveCommandId("shared", commandId);
   return {
-    commandId,
+    commandId: effectiveCommandId,
     createdAt: "2026-03-24T00:00:00.000Z",
-    id: `command:${commandId}`,
+    id: createCommandTabId(effectiveCommandId),
     kind: "command",
     projectId: "project-1",
     shellCwd: ".",
@@ -46,12 +54,17 @@ describe("mergeProjectTabs", () => {
       },
     ];
 
-    const tabs = mergeProjectTabs("project-1", [], existingTabs, new Set(["command:dev"]));
+    const tabs = mergeProjectTabs(
+      "project-1",
+      [],
+      existingTabs,
+      new Set([createCommandTabId(createEffectiveCommandId("shared", "dev"))]),
+    );
 
     expect(tabs).toEqual([
       expect.objectContaining({
-        commandId: "dev",
-        id: "command:dev",
+        commandId: createEffectiveCommandId("shared", "dev"),
+        id: createCommandTabId(createEffectiveCommandId("shared", "dev")),
         kind: "shell",
         title: "Dev",
       }),
@@ -75,8 +88,8 @@ describe("mergeProjectTabs", () => {
 
     expect(tabs).toEqual([
       expect.objectContaining({
-        commandId: "dev",
-        id: "command:dev",
+        commandId: createEffectiveCommandId("shared", "dev"),
+        id: createCommandTabId(createEffectiveCommandId("shared", "dev")),
         kind: "command",
         title: "Dev",
       }),

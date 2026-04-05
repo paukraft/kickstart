@@ -12,21 +12,21 @@ export function Features() {
       items={[
         {
           title: "All your repos, one sidebar",
-          description: "Add all your code repos and see everything at a glance.",
+          description: "Add your projects and see which ones are running, stopped, or need attention.",
           content: (active: boolean) => (
             <FeatureVideo src="/projects.mp4" active={active} />
           ),
         },
         {
           title: "One click, whole project running",
-          description: "Hit start and your entire dev environment spins up.",
+          description: "Hit start and all your project's dev servers launch at once.",
           content: (active: boolean) => (
             <FeatureVideo src="/start-project.mp4" active={active} />
           ),
         },
         {
-          title: "Custom actions per project",
-          description: "Run tests, lint, deploy. Wire up any command as an action.",
+          title: "One-off commands, always ready",
+          description: "Save commands like test, lint, or deploy to each project. Share them with the team or keep them just for you.",
           content: (active: boolean) => (
             <FeatureVideo src="/actions.mp4" active={active} />
           ),
@@ -47,9 +47,9 @@ export function Features() {
           ),
         },
         {
-          title: "Not every terminal needs a name",
+          title: "Throwaway terminals when you need them",
           description:
-            "Need a quick command? Spin up a throwaway terminal in one click.",
+            "Quick command that doesn't need saving? Open a one-off shell in any project.",
           content: (active: boolean) => (
             <FeatureVideo src="/throwaway-terminals.mp4" active={active} />
           ),

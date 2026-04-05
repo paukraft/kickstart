@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -17,7 +16,10 @@ import { autoUpdater } from "electron-updater";
 import {
   CONFIG_FILE_NAME,
   GENERAL_SPACE_ID,
+  createCommandTabId,
   isAutoStartCommand,
+  createEffectiveCommandId,
+  parseEffectiveCommandId,
   type ConfigChangedPayload,
   type CreateGroupFromProjectsInput,
   type CreateProjectInput,
@@ -25,6 +27,7 @@ import {
   type DesktopUpdateActionResult,
   type DesktopUpdateMode,
   type DesktopUpdateState,
+  type EffectiveCommandId,
   type MoveProjectToGroupInput,
   type ProjectConfigPayload,
   type ProjectRecord,
@@ -38,24 +41,29 @@ import {
   type SelectTabInput,
   type ShortcutActionId,
   type TerminalEvent,
+  type UpdateCommandInput,
   type UpsertCommandInput,
 } from "@kickstart/contracts";
 import {
   createCommandInConfig,
   createEmptyKickstartConfig,
   deleteCommandFromConfig,
-  hydrateEditableKickstartConfig,
-  kickstartConfigPath,
   normalizeKickstartConfig,
   reorderCommandsInConfig,
+  reorderResolvedCommands,
   resolveProjectFavicon,
-  stringifyKickstartConfig,
-  upsertCommandInConfig,
 } from "@kickstart/core";
 
 import { AppStore } from "./lib/app-store";
 import { getEditorLaunchCommand, listAvailableEditors } from "./lib/editor-launcher";
 import { ensureProjectTab } from "./lib/project-tabs";
+import {
+  decomposeResolvedCommands,
+  loadProjectCommandPayload,
+  persistProjectCommandConfigs,
+  persistSharedProjectConfig,
+  resolveProjectCommands,
+} from "./lib/project-command-state";
 import { getShortcutDefinitionsForMenu } from "./lib/shortcuts";
 import { TerminalManager } from "./lib/terminal-manager";
 
@@ -777,42 +785,7 @@ function sendTerminalEvent(event: TerminalEvent) {
 }
 
 async function loadProjectConfig(project: ProjectRecord): Promise<ProjectConfigPayload> {
-  const filePath = kickstartConfigPath(project.path);
-  if (!existsSync(filePath)) {
-    return {
-      config: null,
-      configError: null,
-      configExists: false,
-    };
-  }
-
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return {
-      config: hydrateEditableKickstartConfig(JSON.parse(raw)),
-      configError: null,
-      configExists: true,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[kickstart-config] Failed to load config for ${project.path}: ${message}`);
-    return {
-      config: null,
-      configError: message,
-      configExists: true,
-    };
-  }
-}
-
-async function persistProjectConfig(project: ProjectRecord, config: ProjectConfigPayload["config"]) {
-  if (!config) {
-    throw new Error("Cannot persist empty config.");
-  }
-  await fs.writeFile(
-    kickstartConfigPath(project.path),
-    stringifyKickstartConfig(normalizeKickstartConfig(config)),
-    "utf8",
-  );
+  return loadProjectCommandPayload(getStore(), project);
 }
 
 async function configPayloadForProject(projectId: string): Promise<ProjectConfigPayload> {
@@ -823,8 +796,8 @@ async function configPayloadForProject(projectId: string): Promise<ProjectConfig
   return loadProjectConfig(project);
 }
 
-async function syncProjectTabs(projectId: string, config: ProjectConfigPayload["config"]) {
-  const normalizedConfig = config ? normalizeKickstartConfig(config) : null;
+async function syncProjectTabs(projectId: string, payload: ProjectConfigPayload) {
+  const commands = resolveProjectCommands(payload);
   const sessions = await getTerminalManager().getProjectSessions(projectId);
   const runningTabIds = new Set(
     sessions
@@ -833,7 +806,7 @@ async function syncProjectTabs(projectId: string, config: ProjectConfigPayload["
       )
       .map((session) => session.tabId),
   );
-  return getStore().syncTabs(projectId, normalizedConfig?.commands ?? [], runningTabIds);
+  return getStore().syncTabs(projectId, commands, runningTabIds);
 }
 
 async function syncProjectTabsForProject(projectId: string) {
@@ -841,7 +814,7 @@ async function syncProjectTabsForProject(projectId: string) {
     return getStore().getTabState(projectId);
   }
   const payload = await configPayloadForProject(projectId);
-  return syncProjectTabs(projectId, payload.config);
+  return syncProjectTabs(projectId, payload);
 }
 
 async function ensureProjectTabAvailable(projectId: string, tabId: string) {
@@ -860,11 +833,10 @@ async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
   return Promise.all(
     projects.map(async (project) => {
       const config = await loadProjectConfig(project);
-      const startupCommandIds =
-        config.config?.commands.filter(isAutoStartCommand).map((command) => command.id) ??
-        [];
-      const trackedTabIds = startupCommandIds.map((commandId) => `command:${commandId}`);
-      const trackedTabIdSet = new Set(trackedTabIds);
+      const commands = resolveProjectCommands(config);
+      const startupCommandIds = commands.filter(isAutoStartCommand).map((command) => command.id);
+      const trackedTabIds = startupCommandIds.map((commandId) => createCommandTabId(commandId));
+      const trackedTabIdSet = new Set<string>(trackedTabIds);
       const sessions = await getTerminalManager().getProjectSessions(project.id);
       const trackedSessions = sessions.filter((session) => trackedTabIdSet.has(session.tabId));
       const runningCommandCount = trackedSessions.filter((session) => session.hasActiveProcess).length;
@@ -883,19 +855,20 @@ async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
             : "partially-running";
       const favicon = await resolveProjectFavicon(project.path);
       return {
-        configExists: config.configExists,
         groupId: project.groupId,
+        hasCommands: commands.length > 0,
         iconUrl: favicon
           ? `data:${favicon.contentType};base64,${
               (typeof favicon.body === "string"
                 ? Buffer.from(favicon.body, "utf8")
                 : Buffer.from(favicon.body)
               ).toString("base64")
-            }`
+        }`
           : null,
         id: project.id,
         name: project.name,
         path: project.path,
+        sharedConfigExists: config.shared.configExists,
         startupCommandCount,
         runningCommandCount,
         runtimeState,
@@ -911,12 +884,12 @@ async function emitConfigChanged(projectId: string) {
     return;
   }
   const payload = await loadProjectConfig(project);
-  const tabs = await syncProjectTabs(projectId, payload.config);
+  const tabs = await syncProjectTabs(projectId, payload);
   sendConfigChanged({
-    config: payload.config,
-    configError: payload.configError ?? null,
-    configExists: payload.configExists,
+    hasCommands: payload.hasCommands,
+    local: payload.local,
     projectId,
+    shared: payload.shared,
     tabs: tabs.tabs,
   });
 }
@@ -959,17 +932,141 @@ function refreshProjectWatchers() {
   }
 }
 
-async function upsertProjectCommand(input: UpsertCommandInput) {
+async function persistProjectResolvedCommandOrder(
+  project: ProjectRecord,
+  payload: ProjectConfigPayload,
+  orderedCommandIds: readonly EffectiveCommandId[],
+) {
+  const resolved = reorderResolvedCommands(resolveProjectCommands(payload), orderedCommandIds);
+  const decomposed = decomposeResolvedCommands(resolved);
+
+  let nextSharedConfig: ReturnType<typeof normalizeKickstartConfig> | undefined;
+  if (payload.shared.config) {
+    nextSharedConfig = reorderCommandsInConfig(
+      normalizeKickstartConfig(payload.shared.config),
+      decomposed.sharedCommandIds,
+    );
+  }
+
+  let nextLocalConfig: ReturnType<typeof normalizeKickstartConfig> | undefined;
+  if (payload.local.config || resolved.some((command) => command.source === "local")) {
+    nextLocalConfig = reorderCommandsInConfig(
+      normalizeKickstartConfig(payload.local.config ?? createEmptyKickstartConfig()),
+      decomposed.localCommandIds,
+    );
+  }
+
+  await persistProjectCommandConfigs({
+    local: nextLocalConfig,
+    project,
+    shared: nextSharedConfig,
+    store: getStore(),
+  });
+}
+
+async function updateProjectCommand(input: UpdateCommandInput) {
   const project = getStore().getProject(input.projectId);
   if (!project) {
     throw new Error("Project not found.");
   }
   const payload = await loadProjectConfig(project);
-  const nextConfig = upsertCommandInConfig(
-    normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
-    input.command,
+  const existing = parseEffectiveCommandId(input.existingCommandId);
+  if (!existing) {
+    throw new Error("Command not found.");
+  }
+
+  const currentSourceState = payload[existing.source];
+  const nextSourceState = payload[input.source];
+  if (currentSourceState.configError) {
+    throw new Error(`Cannot update ${existing.source} commands while that config is invalid.`);
+  }
+  if (nextSourceState.configError) {
+    throw new Error(`Cannot update ${input.source} commands while that config is invalid.`);
+  }
+
+  const currentSharedConfig = normalizeKickstartConfig(payload.shared.config ?? createEmptyKickstartConfig());
+  const currentLocalConfig = normalizeKickstartConfig(payload.local.config ?? createEmptyKickstartConfig());
+  const existingSourceConfig = existing.source === "shared" ? currentSharedConfig : currentLocalConfig;
+  if (!existingSourceConfig.commands.some((command) => command.id === existing.sourceCommandId)) {
+    throw new Error("Command not found.");
+  }
+  const nextSourceBase =
+    existing.source === "shared"
+      ? deleteCommandFromConfig(currentSharedConfig, existing.sourceCommandId)
+      : deleteCommandFromConfig(currentLocalConfig, existing.sourceCommandId);
+  const targetBase =
+    input.source === existing.source
+      ? nextSourceBase
+      : input.source === "shared"
+        ? currentSharedConfig
+        : currentLocalConfig;
+  const targetWithCommand = createCommandInConfig(targetBase, input.command);
+  const nextSourceCommand = targetWithCommand.commands.at(-1);
+  if (!nextSourceCommand) {
+    throw new Error("Command not found.");
+  }
+
+  const nextSharedConfig =
+    input.source === "shared"
+      ? targetWithCommand
+      : existing.source === "shared"
+        ? nextSourceBase
+        : currentSharedConfig;
+  const nextLocalConfig =
+    input.source === "local"
+      ? targetWithCommand
+      : existing.source === "local"
+        ? nextSourceBase
+        : currentLocalConfig;
+
+  const nextEffectiveCommandId = createEffectiveCommandId(
+    input.source,
+    nextSourceCommand.id,
   );
-  await persistProjectConfig(project, nextConfig);
+  const previousTabId = createCommandTabId(input.existingCommandId);
+  const nextTabId = createCommandTabId(nextEffectiveCommandId);
+  if (
+    previousTabId !== nextTabId &&
+    getStore().getTab(project.id, previousTabId) &&
+    getStore().getTab(project.id, nextTabId)
+  ) {
+    throw new Error("Command tab already exists.");
+  }
+  const currentResolved = resolveProjectCommands(payload);
+  const nextResolved = currentResolved.map((command) =>
+    command.id === input.existingCommandId
+      ? {
+          ...nextSourceCommand,
+          id: nextEffectiveCommandId,
+          source: input.source,
+          sourceCommandId: nextSourceCommand.id,
+        }
+      : command,
+  );
+  const decomposed = decomposeResolvedCommands(nextResolved);
+  await persistProjectCommandConfigs({
+    local:
+      input.source === "local" || existing.source === "local"
+        ? reorderCommandsInConfig(nextLocalConfig, decomposed.localCommandIds)
+        : undefined,
+    project,
+    shared:
+      input.source === "shared" || existing.source === "shared"
+        ? reorderCommandsInConfig(nextSharedConfig, decomposed.sharedCommandIds)
+        : undefined,
+    store: getStore(),
+  });
+
+  if (previousTabId !== nextTabId) {
+    getStore().moveCommandTab(project.id, previousTabId, {
+      commandId: nextEffectiveCommandId,
+      id: nextTabId,
+      shellCwd: nextSourceCommand.cwd,
+      title: nextSourceCommand.name,
+    });
+    await getTerminalManager().moveSessionTab(project.id, previousTabId, nextTabId);
+  }
+
   await emitConfigChanged(input.projectId);
   return loadProjectConfig(project);
 }
@@ -980,11 +1077,21 @@ async function createProjectCommand(input: UpsertCommandInput) {
     throw new Error("Project not found.");
   }
   const payload = await loadProjectConfig(project);
+  const sourceState = payload[input.source];
+  if (sourceState.configError) {
+    throw new Error(`Cannot update ${input.source} commands while that config is invalid.`);
+  }
+
   const nextConfig = createCommandInConfig(
-    normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
+    normalizeKickstartConfig(sourceState.config ?? createEmptyKickstartConfig()),
     input.command,
   );
-  await persistProjectConfig(project, nextConfig);
+  await persistProjectCommandConfigs({
+    local: input.source === "local" ? nextConfig : undefined,
+    project,
+    shared: input.source === "shared" ? nextConfig : undefined,
+    store: getStore(),
+  });
   await emitConfigChanged(input.projectId);
   return loadProjectConfig(project);
 }
@@ -1158,7 +1265,11 @@ function registerIpcHandlers() {
       throw new Error("Project not found.");
     }
     const config = createEmptyKickstartConfig();
-    await persistProjectConfig(project, config);
+    await persistSharedProjectConfig({
+      config,
+      project,
+      store: getStore(),
+    });
     await emitConfigChanged(projectId);
     return loadProjectConfig(project);
   });
@@ -1167,8 +1278,8 @@ function registerIpcHandlers() {
     return createProjectCommand(input);
   });
 
-  ipcMain.handle("kickstart:update-command", async (_event, input: UpsertCommandInput) => {
-    return upsertProjectCommand(input);
+  ipcMain.handle("kickstart:update-command", async (_event, input: UpdateCommandInput) => {
+    return updateProjectCommand(input);
   });
 
   ipcMain.handle("kickstart:delete-command", async (_event, input: DeleteCommandInput) => {
@@ -1177,11 +1288,24 @@ function registerIpcHandlers() {
       throw new Error("Project not found.");
     }
     const payload = await loadProjectConfig(project);
+    const parsed = parseEffectiveCommandId(input.commandId);
+    if (!parsed) {
+      throw new Error("Command not found.");
+    }
+    const sourceState = payload[parsed.source];
+    if (sourceState.configError) {
+      throw new Error(`Cannot update ${parsed.source} commands while that config is invalid.`);
+    }
     const nextConfig = deleteCommandFromConfig(
-      normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
-      input.commandId,
+      normalizeKickstartConfig(sourceState.config ?? createEmptyKickstartConfig()),
+      parsed.sourceCommandId,
     );
-    await persistProjectConfig(project, nextConfig);
+    await persistProjectCommandConfigs({
+      local: parsed.source === "local" ? nextConfig : undefined,
+      project,
+      shared: parsed.source === "shared" ? nextConfig : undefined,
+      store: getStore(),
+    });
     await emitConfigChanged(input.projectId);
     return loadProjectConfig(project);
   });
@@ -1192,11 +1316,7 @@ function registerIpcHandlers() {
       throw new Error("Project not found.");
     }
     const payload = await loadProjectConfig(project);
-    const nextConfig = reorderCommandsInConfig(
-      normalizeKickstartConfig(payload.config ?? createEmptyKickstartConfig()),
-      input.commandIds,
-    );
-    await persistProjectConfig(project, nextConfig);
+    await persistProjectResolvedCommandOrder(project, payload, input.commandIds);
     await emitConfigChanged(input.projectId);
     return loadProjectConfig(project);
   });
@@ -1251,11 +1371,11 @@ function registerIpcHandlers() {
   ipcMain.handle("kickstart:run-project-start", async (_event, projectId: string) => {
     const payload = await configPayloadForProject(projectId);
     await syncProjectTabsForProject(projectId);
-    const startupCommands = payload.config?.commands.filter(isAutoStartCommand) ?? [];
+    const startupCommands = resolveProjectCommands(payload).filter(isAutoStartCommand);
 
     await Promise.all(
       startupCommands.map(async (command) => {
-        const tabId = `command:${command.id}`;
+        const tabId = createCommandTabId(command.id);
         const session = await getTerminalManager().getSession(projectId, tabId);
         if (session?.managedRunActive) {
           return;
@@ -1270,10 +1390,10 @@ function registerIpcHandlers() {
 
   ipcMain.handle("kickstart:stop-project-start", async (_event, projectId: string) => {
     const payload = await configPayloadForProject(projectId);
-    for (const command of payload.config?.commands.filter(isAutoStartCommand) ?? []) {
+    for (const command of resolveProjectCommands(payload).filter(isAutoStartCommand)) {
       await getTerminalManager().stopCommand({
         projectId,
-        tabId: `command:${command.id}`,
+        tabId: createCommandTabId(command.id),
       });
     }
   });
@@ -1290,9 +1410,7 @@ async function createAppState() {
         return null;
       }
       const payload = await loadProjectConfig(project);
-      const commands = payload.config
-        ? normalizeKickstartConfig(payload.config).commands
-        : [];
+      const commands = resolveProjectCommands(payload);
       return commands.find((command) => command.id === commandId) ?? null;
     },
     loadProject: async (projectId) => getStore().getProject(projectId),
@@ -1300,6 +1418,7 @@ async function createAppState() {
     persistTabCwd: async (projectId, tabId, cwd) => getStore().updateTabShellCwd(projectId, tabId, cwd),
     onEvent: sendTerminalEvent,
   });
+  await getTerminalManager().migrateCommandHistoryTabIds(getStore().consumeLegacyCommandTabMigrations());
 
   for (const project of getStore().listProjects()) {
     await emitConfigChanged(project.id);

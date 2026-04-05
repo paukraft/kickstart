@@ -13,13 +13,14 @@ import {
 } from "react";
 
 import type {
-  CommandConfig,
   ProjectGroupRecord,
   ProjectRuntimeState,
   ProjectTabState,
   ProjectWithRuntime,
+  ResolvedCommandConfig,
   TerminalSessionSnapshot,
 } from "@kickstart/contracts";
+import { createCommandTabId } from "@kickstart/contracts";
 
 import { ProjectDropdown } from "@/components/app/project-dropdown";
 import {
@@ -119,7 +120,7 @@ type DropIntent =
 type RuntimeData = {
   tabs: ProjectTabState;
   sessions: TerminalSessionSnapshot[];
-  commands: CommandConfig[];
+  commands: ResolvedCommandConfig[];
 };
 
 type PendingDrag = {
@@ -325,7 +326,7 @@ function RuntimeHoverRows({
 }: {
   tabs: import("@kickstart/contracts").ProjectTabRecord[];
   sessionMap: Map<string, TerminalSessionSnapshot> | null;
-  commandMap: Map<string, CommandConfig> | null;
+  commandMap: Map<string, ResolvedCommandConfig> | null;
 }) {
   const commandRows: { id: string; isRunning: boolean; label: string }[] = [];
   const shellRows: { id: string; isRunning: boolean; label: string }[] = [];
@@ -437,7 +438,7 @@ function ProjectButton({
   const commandMap = runtimeData
     ? new Map(
         runtimeData.commands.map((command) => [
-          `command:${command.id}`,
+          createCommandTabId(command.id),
           command,
         ]),
       )
@@ -451,9 +452,9 @@ function ProjectButton({
       {isReorderBefore && <ReorderLine position="before" />}
       <button
         className={cn(
-          "desktop-no-drag flex items-center justify-center rounded-lg transition-colors touch-none",
+          "desktop-no-drag flex items-center justify-center rounded-lg transition-colors touch-none cursor-pointer",
           compact ? "size-8" : "size-10",
-          onPointerDown && "cursor-grab active:cursor-grabbing",
+          isDragging && "cursor-grabbing",
           isSelected
             ? "bg-accent text-accent-foreground"
             : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
@@ -649,7 +650,8 @@ function CollapsedGroup({
       <RuntimeBadge state={runtimeState} />
       <button
         className={cn(
-          "desktop-no-drag flex size-10 cursor-grab items-center justify-center rounded-lg bg-muted/60 transition-all touch-none active:cursor-grabbing hover:bg-accent",
+          "desktop-no-drag flex size-10 cursor-pointer items-center justify-center rounded-lg bg-muted/60 transition-all touch-none hover:bg-accent",
+          isDragging && "cursor-grabbing",
           isDropTarget && "scale-110 ring-2 ring-primary",
         )}
         onClick={onClick}
@@ -734,7 +736,10 @@ function ExpandedGroup({
         data-group-shell={group.id}
       >
         <button
-          className="desktop-no-drag relative z-10 flex size-8 cursor-grab items-center justify-center rounded-lg text-muted-foreground transition-colors touch-none active:cursor-grabbing hover:bg-accent hover:text-accent-foreground"
+          className={cn(
+            "desktop-no-drag relative z-10 flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors touch-none hover:bg-accent hover:text-accent-foreground",
+            isDragging && "cursor-grabbing",
+          )}
           onClick={onToggleCollapsed}
           onPointerDown={onGroupPointerDown}
           data-group-toggle

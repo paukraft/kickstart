@@ -11,9 +11,33 @@ interface EditorLauncherOptions {
 
 const DARWIN_APP_NAMES: Partial<Record<EditorId, readonly string[]>> = {
   cursor: ["Cursor"],
+  windsurf: ["Windsurf"],
   vscode: ["Visual Studio Code"],
   zed: ["Zed"],
+  intellij: ["IntelliJ IDEA", "IntelliJ IDEA Ultimate", "IntelliJ IDEA CE"],
+  webstorm: ["WebStorm"],
+  pycharm: ["PyCharm", "PyCharm Professional", "PyCharm CE"],
+  goland: ["GoLand"],
+  phpstorm: ["PhpStorm"],
+  rubymine: ["RubyMine"],
+  clion: ["CLion"],
+  rider: ["Rider"],
+  "android-studio": ["Android Studio"],
+  "sublime-text": ["Sublime Text"],
+  nova: ["Nova"],
 };
+
+const DARWIN_OPEN_WITH_ARGS = new Set<EditorId>([
+  "intellij",
+  "webstorm",
+  "pycharm",
+  "goland",
+  "phpstorm",
+  "rubymine",
+  "clion",
+  "rider",
+  "android-studio",
+]);
 
 function pathExists(path: string) {
   try {
@@ -205,9 +229,18 @@ export function getEditorLaunchCommand(
   }
 
   if (editor.command) {
+    const commandArgs = "args" in editor ? editor.args : [];
+
     if (platform === "darwin" && !isCommandAvailable(editor.command, platform, env)) {
       const appName = findDarwinApp(editorId, options);
       if (appName) {
+        if (DARWIN_OPEN_WITH_ARGS.has(editorId)) {
+          return {
+            args: ["-n", "-a", appName, "--args", targetPath],
+            command: getFileManagerCommand(platform),
+          };
+        }
+
         return {
           args: ["-a", appName, targetPath],
           command: getFileManagerCommand(platform),
@@ -216,7 +249,7 @@ export function getEditorLaunchCommand(
     }
 
     return {
-      args: [targetPath],
+      args: [...commandArgs, targetPath],
       command: editor.command,
     };
   }

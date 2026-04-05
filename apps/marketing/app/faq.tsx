@@ -11,7 +11,7 @@ import {
 const items = [
   {
     q: "What is kickstart.json?",
-    a: "It is a small file in your project root that defines the commands for that repo. Each command can have a name, working directory, environment variables, a type, and a start mode.",
+    a: "A config file in your project folder that stores shared commands. When a teammate clones the repo, they get the same setup automatically. Commands you mark as local stay on your machine and never touch the repo.",
   },
   {
     q: "Does it work with any stack?",
@@ -19,7 +19,7 @@ const items = [
   },
   {
     q: "What is the difference between services and actions?",
-    a: "Services are the long-running commands you want to keep around, like a dev server or worker. Actions are one-off commands you run when needed, like tests, lint, builds, or deploy scripts.",
+    a: "Services are long-running processes that stay on while you work, like a dev server or a file watcher. Actions are commands you run once and they finish, like running tests, linting, or deploying.",
   },
   {
     q: "Do terminals survive restarts?",
@@ -39,7 +39,7 @@ const items = [
   },
   {
     q: "Why is the app unsigned?",
-    a: "Signing a macOS app costs $99/year — I've decided against paying that for now, but if Kickstart gets some traction I'll consider it. No worries though, everything works the same, installation just takes a few seconds longer. Try opening the app, then go to System Settings > Privacy & Security and click Open Anyway.",
+    a: "Signing a macOS app costs $99/year. I've decided against paying that for now, but if Kickstart gets some traction I'll consider it. No worries though, everything works the same, installation just takes a few seconds longer. Try opening the app, then go to System Settings > Privacy & Security and click Open Anyway.",
   },
 ]
 

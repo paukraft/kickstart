@@ -1,6 +1,7 @@
 import {
   RiArrowDownSLine,
   RiCloseLine,
+  RiErrorWarningLine,
   RiLoader4Line,
   RiPlayFill,
   RiStopFill,
@@ -8,17 +9,20 @@ import {
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
+  type CommandSource,
   GENERAL_SPACE_ID,
-  type CommandConfig,
   type DesktopUpdateState,
+  type EffectiveCommandId,
+  isAutoStartCommand,
   type ProjectConfigPayload,
   type ProjectGroupRecord,
   type ProjectTabRecord,
   type ProjectWithRuntime,
+  type ResolvedCommandConfig,
   type ShortcutActionId,
   type TerminalSessionSnapshot,
 } from "@kickstart/contracts";
-import { normalizeKickstartConfig } from "@kickstart/core";
+import { resolveMergedKickstartConfig } from "@kickstart/core";
 
 import { CommandDialog } from "@/components/app/command-dialog";
 import { MainContent } from "@/components/app/main-content";
@@ -49,7 +53,7 @@ import { installSoundAutoplayUnlock, playSound } from "@/lib/sounds";
 const GENERAL_SPACE_NAME = "General";
 const RELEASES_URL = "https://github.com/paukraft/kickstart/releases/latest";
 type CommandDialogState =
-  | { mode: "create" }
+  | { mode: "create"; preferredSource: CommandSource }
   | { mode: "edit"; commandId: string }
   | { mode: "list" }
   | null;
@@ -178,6 +182,95 @@ function didActionSidebarTransitionToStart(
   return previouslyBlocked && showsSidebarStartAction(next);
 }
 
+export function reorderCommandsWithinSection(args: {
+  commandTabs: readonly ProjectTabRecord[];
+  commands: readonly ResolvedCommandConfig[];
+  source: CommandSource;
+  sourceId: string;
+  targetId: string;
+  type: ResolvedCommandConfig["type"];
+}): EffectiveCommandId[] {
+  const scopedTabs = args.commandTabs.filter((tab) => {
+    const command = commandByTabId(args.commands, tab.id);
+    if (!command) {
+      return false;
+    }
+    return command.source === args.source && command.type === args.type;
+  });
+  const reorderedScopedTabs = reorderByIds(scopedTabs, args.sourceId, args.targetId);
+  const reorderedScopedCommands = reorderedScopedTabs
+    .map((tab) => commandByTabId(args.commands, tab.id))
+    .filter((command): command is ResolvedCommandConfig => command !== null);
+
+  let scopedIndex = 0;
+  return args.commands
+    .map((command) => {
+      if (command.source !== args.source || command.type !== args.type) {
+        return command;
+      }
+
+      const nextCommand = reorderedScopedCommands[scopedIndex];
+      scopedIndex += 1;
+      return nextCommand ?? command;
+    })
+    .map((command) => command.id);
+}
+
+export function mergeSelectedProjectRuntime(
+  project: ProjectWithRuntime | null,
+  runtime: Pick<
+    ProjectWithRuntime,
+    "hasCommands" | "sharedConfigExists" | "startupCommandCount"
+  >,
+  options?: {
+    isCurrentProjectConfig?: boolean;
+  },
+): ProjectWithRuntime | null {
+  if (!project) {
+    return null;
+  }
+  if (!options?.isCurrentProjectConfig) {
+    return project;
+  }
+
+  return {
+    ...project,
+    hasCommands: runtime.hasCommands,
+    sharedConfigExists: runtime.sharedConfigExists,
+    startupCommandCount: runtime.startupCommandCount,
+  };
+}
+
+function getDefaultCreateCommandSource(
+  projectConfig: ProjectConfigPayload | null,
+): CommandSource {
+  return projectConfig?.shared.configExists && !projectConfig.shared.configError
+    ? "shared"
+    : "local";
+}
+
+export function getBrokenSharedConfigBanner(args: {
+  project: ProjectWithRuntime | null;
+  projectConfig: ProjectConfigPayload | null;
+  projectConfigProjectId: string | null;
+  selectedProjectId: string | null;
+}): { detail: string; title: string } | null {
+  if (
+    !args.project ||
+    !args.projectConfig?.shared.configError ||
+    !args.selectedProjectId ||
+    args.selectedProjectId === GENERAL_SPACE_ID ||
+    args.projectConfigProjectId !== args.selectedProjectId
+  ) {
+    return null;
+  }
+
+  return {
+    detail: args.projectConfig.shared.configError,
+    title: `${args.project.name} has an invalid kickstart.json`,
+  };
+}
+
 export function App() {
   // ── Core state ──────────────────────────────────────────────
   const [projects, setProjects] = useState<ProjectWithRuntime[]>([]);
@@ -192,6 +285,7 @@ export function App() {
   const [terminalSessions, setTerminalSessions] = useState<
     Record<string, TerminalSessionSnapshot>
   >({});
+  const [projectConfigProjectId, setProjectConfigProjectId] = useState<string | null>(null);
   // ── Dialog state ────────────────────────────────────────────
   const [commandDialogState, setCommandDialogState] =
     useState<CommandDialogState>(null);
@@ -219,19 +313,37 @@ export function App() {
   latestTerminalSessionsRef.current = terminalSessions;
 
   // ── Derived ─────────────────────────────────────────────────
+  const commands = useMemo(
+    () => {
+      if (!projectConfig) {
+        return [];
+      }
+      return resolveMergedKickstartConfig({
+        local: projectConfig.local.config,
+        shared: projectConfig.shared.config,
+      }).commands;
+    },
+    [projectConfig],
+  );
   const selectedProject = useMemo(
-    () => projects.find((p) => p.id === selectedProjectId) ?? null,
-    [projects, selectedProjectId],
+    () =>
+      mergeSelectedProjectRuntime(
+        projects.find((p) => p.id === selectedProjectId) ?? null,
+        {
+          hasCommands: commands.length > 0,
+          sharedConfigExists: projectConfig?.shared.configExists ?? false,
+          startupCommandCount: commands.filter(isAutoStartCommand).length,
+        },
+        {
+          isCurrentProjectConfig:
+            selectedProjectId !== null &&
+            selectedProjectId !== GENERAL_SPACE_ID &&
+            projectConfigProjectId === selectedProjectId,
+        },
+      ),
+    [commands, projectConfig, projectConfigProjectId, projects, selectedProjectId],
   );
   const isGeneralSpaceSelected = selectedProjectId === GENERAL_SPACE_ID;
-  const editableCommands = projectConfig?.config?.commands ?? [];
-  const commands = useMemo(
-    () =>
-      projectConfig?.config
-        ? normalizeKickstartConfig(projectConfig.config).commands
-        : [],
-    [projectConfig?.config],
-  );
   const activeTab =
     tabs.find((t) => t.id === selectedTabId) ??
     tabs[0] ??
@@ -346,6 +458,7 @@ export function App() {
         return;
       }
       setProjectConfig(null);
+      setProjectConfigProjectId(null);
       setTerminalSessions(mapSessionsByTabId(sessions));
       setTabs(tabs.tabs);
       setSelectedTabId((current) =>
@@ -365,6 +478,7 @@ export function App() {
       return;
     }
     setProjectConfig(config);
+    setProjectConfigProjectId(projectId);
     setTerminalSessions(mapSessionsByTabId(sessions));
     setTabs(tabs.tabs);
     setSelectedTabId((current) =>
@@ -403,9 +517,10 @@ export function App() {
     return {
       tabs: nextTabs,
       sessions,
-      commands: config.config
-        ? normalizeKickstartConfig(config.config).commands
-        : [],
+      commands: resolveMergedKickstartConfig({
+        local: config.local.config,
+        shared: config.shared.config,
+      }).commands,
     };
   });
 
@@ -555,10 +670,11 @@ export function App() {
     const unsubscribe = window.desktop.watchConfig((payload) => {
       if (payload.projectId === selectedProjectId) {
         setProjectConfig({
-          config: payload.config,
-          configError: payload.configError ?? null,
-          configExists: payload.configExists,
+          hasCommands: payload.hasCommands,
+          local: payload.local,
+          shared: payload.shared,
         });
+        setProjectConfigProjectId(payload.projectId);
         setTabs(payload.tabs);
         setSelectedTabId((current) =>
           resolveSelectedTabId(payload.tabs, current),
@@ -591,8 +707,9 @@ export function App() {
       selectedProject.id,
     );
     setProjectConfig(payload);
+    setProjectConfigProjectId(selectedProject.id);
     await refreshProjectState(selectedProject.id);
-    openCreateCommandDialog();
+    openCreateCommandDialog("shared");
   }
 
   async function handleSelectTab(tabId: string) {
@@ -956,13 +1073,23 @@ export function App() {
     await refreshProjects({ keepSelection: true });
   }
 
-  async function handleReorderCommands(sourceId: string, targetId: string) {
+  async function handleReorderCommands(
+    source: CommandSource,
+    type: ResolvedCommandConfig["type"],
+    sourceId: string,
+    targetId: string,
+  ) {
     if (!selectedProject || sourceId === targetId) return;
-    const next = reorderByIds(commandTabs, sourceId, targetId);
+    const next = reorderCommandsWithinSection({
+      commandTabs,
+      commands,
+      source,
+      sourceId,
+      targetId,
+      type,
+    });
     await window.desktop.reorderCommands({
-      commandIds: next
-        .map((tab) => tab.commandId)
-        .filter((commandId): commandId is string => Boolean(commandId)),
+      commandIds: next,
       projectId: selectedProject.id,
     });
     await refreshProjectState(selectedProject.id);
@@ -981,8 +1108,10 @@ export function App() {
     );
   }
 
-  function openCreateCommandDialog() {
-    setCommandDialogState({ mode: "create" });
+  function openCreateCommandDialog(
+    preferredSource: CommandSource = getDefaultCreateCommandSource(projectConfig),
+  ) {
+    setCommandDialogState({ mode: "create", preferredSource });
   }
 
   function openProjectSettings(projectId: string) {
@@ -995,7 +1124,7 @@ export function App() {
     setDeleteDialogOpen(true);
   }
 
-  function openEditCommandDialog(command: CommandConfig) {
+  function openEditCommandDialog(command: ResolvedCommandConfig) {
     setCommandDialogState({ mode: "edit", commandId: command.id });
   }
 
@@ -1041,6 +1170,12 @@ export function App() {
     : null;
   const isUpdateBannerDismissed =
     updateBannerKey !== null && updateBannerKey === dismissedBannerKey;
+  const brokenSharedConfigBanner = getBrokenSharedConfigBanner({
+    project: selectedProject,
+    projectConfig,
+    projectConfigProjectId,
+    selectedProjectId,
+  });
 
   return (
     <TooltipProvider>
@@ -1117,6 +1252,27 @@ export function App() {
                     <RiCloseLine />
                   </Button>
                 ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {brokenSharedConfigBanner ? (
+          <div className="border-b border-amber-500/20 bg-amber-500/8 px-3 py-2 text-sm">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-amber-600 dark:text-amber-400">
+                <RiErrorWarningLine className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-medium text-foreground">
+                  {brokenSharedConfigBanner.title}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Shared commands are unavailable until the file is fixed.
+                </p>
+                <p className="mt-1 break-words font-mono text-xs text-muted-foreground">
+                  {brokenSharedConfigBanner.detail}
+                </p>
               </div>
             </div>
           </div>
@@ -1225,11 +1381,11 @@ export function App() {
                 onRestartTab={(tab) => void handleRestartTab(tab)}
                 onStopTab={(tab) => void handleStopTab(tab)}
                 onEditCommand={openEditCommandDialog}
-                onAddCommand={openCreateCommandDialog}
+                onAddCommand={() => openCreateCommandDialog()}
                 onCreateShellTab={() => void handleCreateShellTab()}
                 onDeleteShellTab={requestDeleteShellTab}
-                onReorderCommands={(sourceId, targetId) =>
-                  void handleReorderCommands(sourceId, targetId)
+                onReorderCommands={(source, type, sourceId, targetId) =>
+                  void handleReorderCommands(source, type, sourceId, targetId)
                 }
                 onReorderShellTabs={(sourceId, targetId) =>
                   void handleReorderShellTabs(sourceId, targetId)
@@ -1274,14 +1430,21 @@ export function App() {
               workspaceName={
                 isGeneralSpaceSelected ? GENERAL_SPACE_NAME : undefined
               }
-              configExists={
+              hasCommands={isGeneralSpaceSelected ? true : (projectConfig?.hasCommands ?? false)}
+              sharedConfigError={
+                isGeneralSpaceSelected
+                  ? null
+                  : (projectConfig?.shared.configError ?? null)
+              }
+              sharedConfigExists={
                 isGeneralSpaceSelected
                   ? true
-                  : (projectConfig?.configExists ?? false)
+                  : (projectConfig?.shared.configExists ?? false)
               }
               activeTab={activeTab}
               activeCommand={activeCommand}
               onAddProject={() => void handleAddProject()}
+              onAddLocalCommand={() => openCreateCommandDialog("local")}
               onCreateConfig={() => void handleCreateConfig()}
               onCreateShellTab={() => void handleCreateShellTab()}
             />
@@ -1301,10 +1464,15 @@ export function App() {
               ? commandDialogState.commandId
               : null
           }
+          preferredCreateSource={
+            commandDialogState?.mode === "create"
+              ? commandDialogState.preferredSource
+              : getDefaultCreateCommandSource(projectConfig)
+          }
           projectId={selectedProject?.id ?? ""}
           projectName={selectedProject?.name ?? GENERAL_SPACE_NAME}
           commands={commands}
-          editableCommands={editableCommands}
+          projectConfig={projectConfig}
           onCommandsChanged={handleCommandsChanged}
         />
 

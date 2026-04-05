@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CommandConfig } from "@kickstart/contracts";
+import { createEffectiveCommandId, type CommandConfig } from "@kickstart/contracts";
 
 import {
   createCommandInConfig,
@@ -7,6 +7,9 @@ import {
   deleteCommandFromConfig,
   hydrateEditableKickstartConfig,
   normalizeKickstartConfig,
+  reorderResolvedCommands,
+  resolveMergedKickstartConfig,
+  resolveSourceCommandOrder,
   reorderCommandsInConfig,
   stringifyKickstartConfig,
   upsertCommandInConfig,
@@ -174,5 +177,97 @@ describe("config mutations", () => {
     });
 
     expect(stringifyKickstartConfig(config)).not.toContain("\"soundId\"");
+  });
+});
+
+describe("resolveMergedKickstartConfig", () => {
+  it("merges shared and local commands without id collisions", () => {
+    const config = resolveMergedKickstartConfig({
+      local: {
+        commands: [{ command: "pnpm dev", cwd: ".", id: "dev", startMode: "manual", type: "service" }],
+      },
+      shared: {
+        commands: [{ command: "pnpm dev", cwd: ".", id: "dev", startMode: "manual", type: "service" }],
+      },
+    });
+
+    expect(config.commands.map((command) => command.id)).toEqual([
+      "shared:dev",
+      "local:dev",
+    ]);
+  });
+
+  it("keeps shared commands before local commands", () => {
+    const config = resolveMergedKickstartConfig({
+      local: {
+        commands: [{ command: "pnpm lint", cwd: ".", id: "lint", startMode: "manual", type: "action" }],
+      },
+      shared: {
+        commands: [{ command: "pnpm dev", cwd: ".", id: "dev", startMode: "manual", type: "service" }],
+      },
+    });
+
+    expect(config.commands.map((command) => command.id)).toEqual([
+      "shared:dev",
+      "local:lint",
+    ]);
+  });
+
+  it("derives source-local order from any transient reordered sequence", () => {
+    const resolved = resolveMergedKickstartConfig({
+      local: {
+        commands: [
+          { command: "pnpm lint", cwd: ".", id: "lint", startMode: "manual", type: "action" },
+          { command: "pnpm test", cwd: ".", id: "test", startMode: "manual", type: "action" },
+        ],
+      },
+      shared: {
+        commands: [{ command: "pnpm dev", cwd: ".", id: "dev", startMode: "manual", type: "service" }],
+      },
+    });
+
+    const ordered = reorderResolvedCommands(resolved.commands, [
+      createEffectiveCommandId("local", "test"),
+      createEffectiveCommandId("shared", "dev"),
+      createEffectiveCommandId("local", "lint"),
+    ]);
+
+    expect(resolveSourceCommandOrder(ordered, "shared")).toEqual(["dev"]);
+    expect(resolveSourceCommandOrder(ordered, "local")).toEqual(["test", "lint"]);
+  });
+});
+
+describe("reorderResolvedCommands", () => {
+  it("applies an explicit effective-id order and appends anything missing", () => {
+    expect(
+      reorderResolvedCommands(
+        [
+          {
+            command: "pnpm dev",
+            cwd: ".",
+            id: createEffectiveCommandId("shared", "a"),
+            name: "A",
+            source: "shared",
+            sourceCommandId: "a",
+            startMode: "manual",
+            type: "service",
+          },
+          {
+            command: "pnpm test",
+            cwd: ".",
+            id: createEffectiveCommandId("local", "b"),
+            name: "B",
+            source: "local",
+            sourceCommandId: "b",
+            startMode: "manual",
+            type: "action",
+          },
+        ],
+        [createEffectiveCommandId("local", "b")],
+      ),
+    ).toEqual([
+      expect.objectContaining({ id: createEffectiveCommandId("local", "b") }),
+      expect.objectContaining({ id: createEffectiveCommandId("shared", "a") }),
+    ]);
   });
 });

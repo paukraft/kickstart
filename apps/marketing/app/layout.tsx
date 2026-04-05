@@ -17,9 +17,9 @@ const fontMono = JetBrains_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "Kickstart — Desktop launcher for dev projects",
+  title: "Kickstart — Manage dev servers across all your repos",
   description:
-    "Add repos, pin dev commands, and keep every terminal tab durable across restarts.",
+    "Free macOS app that runs and organizes your dev commands across every project. One click to start everything, one place to see what's running.",
 }
 
 export default function RootLayout({

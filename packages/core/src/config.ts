@@ -4,10 +4,14 @@ import {
   CONFIG_FILE_NAME,
   COMMAND_ID_MAX_LENGTH,
   type CommandConfig,
+  type CommandSource,
   type EditableCommandConfig,
   type EditableKickstartConfig,
   type KickstartConfig,
   type PersistedCommandConfig,
+  type ResolvedCommandConfig,
+  type ResolvedKickstartConfig,
+  createEffectiveCommandId,
   deriveCommandId,
   deriveCommandName,
   editableKickstartConfigSchema,
@@ -72,6 +76,51 @@ function hydrateCommands(commands: PersistedCommandConfig[]): CommandConfig[] {
   }));
 }
 
+function resolveSourceCommands(
+  source: CommandSource,
+  config: EditableKickstartConfig | KickstartConfig | null | undefined,
+): ResolvedCommandConfig[] {
+  if (!config) {
+    return [];
+  }
+
+  return normalizeKickstartConfig(config).commands.map((command) => ({
+    ...command,
+    id: createEffectiveCommandId(source, command.id),
+    source,
+    sourceCommandId: command.id,
+  }));
+}
+
+export function reorderResolvedCommands(
+  commands: readonly ResolvedCommandConfig[],
+  orderedCommandIds: readonly string[],
+): ResolvedCommandConfig[] {
+  const byId = new Map<string, ResolvedCommandConfig>(
+    commands.map((command) => [command.id, command]),
+  );
+  const ordered: ResolvedCommandConfig[] = [];
+  const seen = new Set<string>();
+
+  for (const commandId of orderedCommandIds) {
+    const command = byId.get(commandId);
+    if (!command || seen.has(command.id)) {
+      continue;
+    }
+    ordered.push(command);
+    seen.add(command.id);
+  }
+
+  for (const command of commands) {
+    if (seen.has(command.id)) {
+      continue;
+    }
+    ordered.push(command);
+  }
+
+  return ordered;
+}
+
 export function hydrateEditableKickstartConfig(input: unknown): EditableKickstartConfig {
   const parsed = persistedKickstartConfigSchema.parse(input);
   return editableKickstartConfigSchema.parse({
@@ -84,6 +133,20 @@ export function normalizeKickstartConfig(input: unknown): KickstartConfig {
   return kickstartConfigSchema.parse({
     commands: hydrateCommands(parsed.commands),
   });
+}
+
+export function resolveMergedKickstartConfig(args: {
+  local?: EditableKickstartConfig | KickstartConfig | null;
+  shared?: EditableKickstartConfig | KickstartConfig | null;
+}): ResolvedKickstartConfig {
+  const commands = [
+    ...resolveSourceCommands("shared", args.shared),
+    ...resolveSourceCommands("local", args.local),
+  ];
+
+  return {
+    commands,
+  };
 }
 
 export function createEmptyKickstartConfig(): KickstartConfig {
@@ -170,4 +233,13 @@ export function reorderCommandsInConfig(
     ...config,
     commands: [...ordered, ...remaining],
   });
+}
+
+export function resolveSourceCommandOrder(
+  commands: readonly ResolvedCommandConfig[],
+  source: CommandSource,
+): string[] {
+  return commands
+    .filter((command) => command.source === source)
+    .map((command) => command.sourceCommandId);
 }

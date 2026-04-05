@@ -6,9 +6,9 @@ import { promisify } from "node:util";
 
 import {
   GENERAL_SPACE_ID,
-  type CommandConfig,
   type ProjectRecord,
   type ProjectTabRecord,
+  type ResolvedCommandConfig,
   type TerminalCloseInput,
   type TerminalEvent,
   type TerminalOpenInput,
@@ -57,7 +57,7 @@ interface TerminalSessionState {
 
 interface TerminalManagerOptions {
   historyDir: string;
-  loadCommand: (projectId: string, commandId: string) => Promise<CommandConfig | null>;
+  loadCommand: (projectId: string, commandId: string) => Promise<ResolvedCommandConfig | null>;
   loadProject: (projectId: string) => Promise<ProjectRecord | null>;
   loadTab: (projectId: string, tabId: string) => Promise<ProjectTabRecord | null>;
   onEvent: (event: TerminalEvent) => void;
@@ -827,7 +827,7 @@ add-zsh-hook preexec _kickstart_preexec
       throw new Error("Project not found.");
     }
     let cwd = resolveShellTabCwd(project.path, tab.shellCwd);
-    let command: CommandConfig | null = null;
+    let command: ResolvedCommandConfig | null = null;
     if (tab.commandId) {
       command = await this.loadCommand(projectId, tab.commandId);
       if (command) {
@@ -1155,6 +1155,62 @@ add-zsh-hook preexec _kickstart_preexec
       return null;
     }
     return this.snapshot(session);
+  }
+
+  private moveHistory(projectId: string, previousTabId: string, nextTabId: string, history: string | null) {
+    if (previousTabId === nextTabId) {
+      return;
+    }
+
+    const previousHistoryPath = this.historyPath(projectId, previousTabId);
+    const nextHistoryPath = this.historyPath(projectId, nextTabId);
+
+    try {
+      if (fs.existsSync(previousHistoryPath)) {
+        fs.rmSync(nextHistoryPath, { force: true });
+        fs.renameSync(previousHistoryPath, nextHistoryPath);
+      } else if (history) {
+        fs.writeFileSync(nextHistoryPath, history, "utf8");
+      }
+    } catch {
+      // Ignore history migration failures and keep the session usable.
+    }
+  }
+
+  async moveSessionTab(projectId: string, previousTabId: string, nextTabId: string) {
+    if (previousTabId === nextTabId) {
+      return;
+    }
+
+    const previousKey = this.sessionKey(projectId, previousTabId);
+    const session = this.sessions.get(previousKey);
+    this.moveHistory(projectId, previousTabId, nextTabId, session?.history ?? null);
+    if (!session) {
+      return;
+    }
+
+    if (session.persistTimer) {
+      clearTimeout(session.persistTimer);
+      session.persistTimer = null;
+    }
+
+    this.sessions.delete(previousKey);
+    session.tabId = nextTabId;
+    session.updatedAt = new Date().toISOString();
+    session.lastPublishedStateKey = null;
+    this.sessions.set(this.sessionKey(projectId, nextTabId), session);
+  }
+
+  async migrateCommandHistoryTabIds(
+    migrations: ReadonlyArray<{
+      nextTabId: string;
+      previousTabId: string;
+      projectId: string;
+    }>,
+  ) {
+    for (const migration of migrations) {
+      await this.moveSessionTab(migration.projectId, migration.previousTabId, migration.nextTabId);
+    }
   }
 
   async close(input: TerminalCloseInput) {

@@ -1,8 +1,9 @@
 import {
+  createCommandTabId,
   isActionCommand,
   isServiceCommand,
-  type CommandConfig,
   type ProjectTabRecord,
+  type ResolvedCommandConfig,
 } from "@kickstart/contracts";
 
 export function envRecordToText(env?: Record<string, string>) {
@@ -39,13 +40,13 @@ export function envTextToRecord(input: string): Record<string, string> | undefin
   return Object.fromEntries(entries);
 }
 
-export function commandByTabId(commands: CommandConfig[], tabId: string) {
-  return commands.find((command) => `command:${command.id}` === tabId) ?? null;
+export function commandByTabId(commands: readonly ResolvedCommandConfig[], tabId: string) {
+  return commands.find((command) => createCommandTabId(command.id) === tabId) ?? null;
 }
 
 export function getPreferredCommandTabId(
-  commands: CommandConfig[],
-  tabs: ProjectTabRecord[],
+  commands: readonly ResolvedCommandConfig[],
+  tabs: readonly ProjectTabRecord[],
 ) {
   const commandTabs = tabs.filter((tab) => tab.kind === "command");
   const serviceTab = commandTabs.find((tab) => {

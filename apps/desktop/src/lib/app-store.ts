@@ -3,11 +3,16 @@ import path from "node:path";
 
 import {
   GENERAL_SPACE_ID,
-  type CommandConfig,
+  commandIdSchema,
+  createCommandTabId,
+  createEffectiveCommandId,
+  parseCommandTabId,
+  parseEffectiveCommandId,
   type ProjectGroupRecord,
   type ProjectRecord,
   type ProjectTabRecord,
   type ProjectTabState,
+  type ResolvedCommandConfig,
 } from "@kickstart/contracts";
 import { mergeProjectTabs } from "@kickstart/core";
 import Database from "better-sqlite3";
@@ -36,8 +41,24 @@ type RailSortItem =
   | { createdAt: string; id: string; sortOrder: number; type: "group" }
   | { createdAt: string; id: string; sortOrder: number; type: "project" };
 
+interface StoredProjectCommandState {
+  createdAt: string;
+  localConfigJson: string | null;
+  projectPath: string;
+  updatedAt: string;
+}
+
+export interface LegacyCommandTabMigration {
+  nextCommandId: string;
+  nextTabId: string;
+  previousCommandId: string;
+  previousTabId: string;
+  projectId: string;
+}
+
 export class AppStore {
   private readonly db: Database.Database;
+  private pendingLegacyCommandTabMigrations: LegacyCommandTabMigration[] = [];
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -100,6 +121,13 @@ export class AppStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS project_command_state (
+        project_path TEXT PRIMARY KEY,
+        local_config_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     // Add group_id column if missing (migration for existing databases)
@@ -124,10 +152,117 @@ export class AppStore {
         ALTER TABLE project_groups_new RENAME TO project_groups;
       `);
     }
+
+    this.pendingLegacyCommandTabMigrations = this.migrateLegacyCommandTabs();
   }
 
   close() {
     this.db.close();
+  }
+
+  consumeLegacyCommandTabMigrations(): LegacyCommandTabMigration[] {
+    const migrations = this.pendingLegacyCommandTabMigrations;
+    this.pendingLegacyCommandTabMigrations = [];
+    return migrations;
+  }
+
+  private migrateLegacyCommandTabs(): LegacyCommandTabMigration[] {
+    const rows = this.db
+      .prepare(
+        `SELECT project_id as projectId, id, kind, command_id as commandId
+         FROM project_tabs
+         WHERE command_id IS NOT NULL`,
+      )
+      .all() as Array<{
+      commandId: string | null;
+      id: string;
+      kind: ProjectTabRecord["kind"];
+      projectId: string;
+    }>;
+
+    const updates = rows.flatMap((row) => {
+      if (!row.commandId) {
+        return [];
+      }
+      if (parseEffectiveCommandId(row.commandId)) {
+        return [];
+      }
+      if (!commandIdSchema.safeParse(row.commandId).success) {
+        return [];
+      }
+
+      const nextCommandId = createEffectiveCommandId("shared", row.commandId);
+      const nextTabId = row.kind === "command" ? createCommandTabId(nextCommandId) : row.id;
+      const previousTabId =
+        row.kind === "command" && parseCommandTabId(row.id)?.commandId === row.commandId
+          ? row.id
+          : createCommandTabId(row.commandId);
+
+      return [{
+        nextCommandId,
+        nextTabId,
+        previousCommandId: row.commandId,
+        previousTabId,
+        projectId: row.projectId,
+        rowId: row.id,
+      }];
+    });
+
+    if (updates.length === 0) {
+      return [];
+    }
+
+    const transaction = this.db.transaction((items: typeof updates) => {
+      const timestamp = now();
+      for (const item of items) {
+        if (item.rowId !== item.nextTabId) {
+          const collision = this.db
+            .prepare(
+              `SELECT 1
+               FROM project_tabs
+               WHERE project_id = ? AND id = ?`,
+            )
+            .get(item.projectId, item.nextTabId);
+          if (collision) {
+            throw new Error(
+              `Cannot migrate command tab ${item.projectId}:${item.rowId} because ${item.nextTabId} already exists.`,
+            );
+          }
+        }
+
+        this.db
+          .prepare(
+            `UPDATE project_tabs
+             SET id = ?,
+                 command_id = ?,
+                 updated_at = ?
+             WHERE project_id = ? AND id = ?`,
+          )
+          .run(item.nextTabId, item.nextCommandId, timestamp, item.projectId, item.rowId);
+
+        if (item.rowId !== item.nextTabId) {
+          this.db
+            .prepare(
+              `UPDATE project_ui_state
+               SET active_tab_id = ?, selected_at = ?
+               WHERE project_id = ? AND active_tab_id = ?`,
+            )
+            .run(item.nextTabId, timestamp, item.projectId, item.rowId);
+        }
+      }
+    });
+
+    transaction(updates);
+
+    return updates
+      .filter((item) => item.rowId !== item.nextTabId)
+      .map(({ nextCommandId, nextTabId, previousCommandId, previousTabId, projectId }) => ({
+        nextCommandId,
+        nextTabId,
+        previousCommandId,
+        previousTabId,
+        projectId,
+      }));
   }
 
   private normalizeRailSortOrders() {
@@ -205,6 +340,70 @@ export class AppStore {
     );
   }
 
+  getProjectCommandState(projectPath: string): StoredProjectCommandState | null {
+    return (
+      (this.db
+        .prepare(
+          `SELECT project_path as projectPath,
+                  local_config_json as localConfigJson,
+                  created_at as createdAt,
+                  updated_at as updatedAt
+           FROM project_command_state
+           WHERE project_path = ?`,
+        )
+        .get(projectPath) as StoredProjectCommandState | undefined) ?? null
+    );
+  }
+
+  setProjectLocalConfig(projectPath: string, localConfigJson: string | null) {
+    const existing = this.getProjectCommandState(projectPath);
+    this.writeProjectCommandState(projectPath, {
+      createdAt: existing?.createdAt ?? now(),
+      localConfigJson,
+    });
+  }
+
+  restoreProjectCommandState(
+    projectPath: string,
+    input: {
+      localConfigJson: string | null;
+    },
+  ) {
+    const existing = this.getProjectCommandState(projectPath);
+    this.writeProjectCommandState(projectPath, {
+      createdAt: existing?.createdAt ?? now(),
+      localConfigJson: input.localConfigJson,
+    });
+  }
+
+  private writeProjectCommandState(
+    projectPath: string,
+    input: {
+      createdAt: string;
+      localConfigJson: string | null;
+    },
+  ) {
+    if (!input.localConfigJson) {
+      this.db.prepare(`DELETE FROM project_command_state WHERE project_path = ?`).run(projectPath);
+      return;
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO project_command_state (
+           project_path,
+           local_config_json,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(project_path) DO UPDATE SET
+           local_config_json = excluded.local_config_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(projectPath, input.localConfigJson, input.createdAt, now());
+  }
+
   createProject(projectPath: string, name: string): ProjectRecord {
     const existing = this.db
       .prepare(
@@ -240,11 +439,14 @@ export class AppStore {
   deleteProject(projectId: string) {
     const transaction = this.db.transaction((id: string) => {
       const project = this.db
-        .prepare(`SELECT group_id as groupId FROM projects WHERE id = ?`)
-        .get(id) as { groupId: string | null } | undefined;
+        .prepare(`SELECT group_id as groupId, path FROM projects WHERE id = ?`)
+        .get(id) as { groupId: string | null; path: string } | undefined;
 
       this.db.prepare(`DELETE FROM project_tabs WHERE project_id = ?`).run(id);
       this.db.prepare(`DELETE FROM project_ui_state WHERE project_id = ?`).run(id);
+      if (project) {
+        this.db.prepare(`DELETE FROM project_command_state WHERE project_path = ?`).run(project.path);
+      }
       this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
 
       if (project?.groupId) {
@@ -333,7 +535,11 @@ export class AppStore {
     transaction(projectId, normalizeTabs(tabs));
   }
 
-  syncTabs(projectId: string, commands: CommandConfig[], runningTabIds?: ReadonlySet<string>): ProjectTabState {
+  syncTabs(
+    projectId: string,
+    commands: ResolvedCommandConfig[],
+    runningTabIds?: ReadonlySet<string>,
+  ): ProjectTabState {
     if (isGeneralSpace(projectId)) {
       return this.getTabState(projectId);
     }
@@ -382,6 +588,80 @@ export class AppStore {
          WHERE project_id = ? AND id = ?`,
       )
       .run(shellCwd, timestamp, projectId, tabId);
+  }
+
+  moveCommandTab(
+    projectId: string,
+    previousTabId: string,
+    nextTab: {
+      commandId: string;
+      id: string;
+      shellCwd: string;
+      title: string;
+    },
+  ) {
+    if (isGeneralSpace(projectId) || previousTabId === nextTab.id) {
+      return;
+    }
+
+    const transaction = this.db.transaction((
+      projectIdValue: string,
+      previousId: string,
+      next,
+    ) => {
+      const existing = this.db
+        .prepare(
+          `SELECT id
+           FROM project_tabs
+           WHERE project_id = ? AND id = ? AND kind = 'command'`,
+        )
+        .get(projectIdValue, previousId) as { id: string } | undefined;
+      if (!existing) {
+        return;
+      }
+
+      const collision = this.db
+        .prepare(
+          `SELECT id
+           FROM project_tabs
+           WHERE project_id = ? AND id = ?`,
+        )
+        .get(projectIdValue, next.id) as { id: string } | undefined;
+      if (collision) {
+        throw new Error(`Tab ${next.id} already exists.`);
+      }
+
+      const timestamp = now();
+      this.db
+        .prepare(
+          `UPDATE project_tabs
+           SET id = ?,
+               command_id = ?,
+               title = ?,
+               shell_cwd = ?,
+               updated_at = ?
+           WHERE project_id = ? AND id = ?`,
+        )
+        .run(
+          next.id,
+          next.commandId,
+          next.title,
+          next.shellCwd,
+          timestamp,
+          projectIdValue,
+          previousId,
+        );
+
+      this.db
+        .prepare(
+          `UPDATE project_ui_state
+           SET active_tab_id = ?, selected_at = ?
+           WHERE project_id = ? AND active_tab_id = ?`,
+        )
+        .run(next.id, timestamp, projectIdValue, previousId);
+    });
+
+    transaction(projectId, previousTabId, nextTab);
   }
 
   deleteShellTab(projectId: string, tabId: string): ProjectTabState {

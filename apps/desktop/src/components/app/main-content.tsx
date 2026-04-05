@@ -2,9 +2,9 @@ import wordmark from "@/assets/wordmark.png";
 import { RiAddLine, RiCodeSSlashLine } from "@remixicon/react";
 
 import type {
-  CommandConfig,
   ProjectTabRecord,
   ProjectWithRuntime,
+  ResolvedCommandConfig,
 } from "@kickstart/contracts";
 
 import { TerminalView } from "@/components/app/terminal-view";
@@ -22,10 +22,13 @@ interface MainContentProps {
   project: ProjectWithRuntime | null;
   workspaceId: string | null;
   workspaceName?: string;
-  configExists: boolean;
+  hasCommands: boolean;
+  sharedConfigError?: string | null;
+  sharedConfigExists: boolean;
   activeTab: ProjectTabRecord | null;
-  activeCommand: CommandConfig | null;
+  activeCommand: ResolvedCommandConfig | null;
   onAddProject: () => void;
+  onAddLocalCommand: () => void;
   onCreateConfig: () => void;
   onCreateShellTab: () => void;
 }
@@ -34,10 +37,13 @@ export function MainContent({
   project,
   workspaceId,
   workspaceName,
-  configExists,
+  hasCommands,
+  sharedConfigError,
+  sharedConfigExists,
   activeTab,
   activeCommand: _activeCommand,
   onAddProject,
+  onAddLocalCommand,
   onCreateConfig,
   onCreateShellTab,
 }: MainContentProps) {
@@ -72,23 +78,33 @@ export function MainContent({
     );
   }
 
-  if (!configExists) {
+  if (!hasCommands) {
     return (
       <Empty className="h-full">
         <EmptyHeader>
           <EmptyMedia variant="icon">
             <RiCodeSSlashLine />
           </EmptyMedia>
-          <EmptyTitle>Create kickstart.json</EmptyTitle>
+          <EmptyTitle>
+            {sharedConfigError ? "Shared config needs attention" : "Add your first command"}
+          </EmptyTitle>
           <EmptyDescription>
-            Keep commands in the repo and let Kickstart own the UI state.
+            {sharedConfigError
+              ? `kickstart.json exists, but Kickstart could not parse it: ${sharedConfigError}`
+              : "Save a personal command just for yourself, or create `kickstart.json` for shared repo commands."}
           </EmptyDescription>
         </EmptyHeader>
-        <EmptyContent>
-          <Button size="sm" onClick={onCreateConfig}>
+        <EmptyContent className="flex gap-2">
+          <Button size="sm" onClick={onAddLocalCommand}>
             <RiAddLine />
-            Create Config
+            Add Personal Command
           </Button>
+          {!sharedConfigExists && !sharedConfigError ? (
+            <Button size="sm" variant="outline" onClick={onCreateConfig}>
+              <RiCodeSSlashLine />
+              Create Shared Config
+            </Button>
+          ) : null}
         </EmptyContent>
       </Empty>
     );

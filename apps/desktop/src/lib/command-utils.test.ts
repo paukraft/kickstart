@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { CommandConfig, ProjectTabRecord } from "@kickstart/contracts";
-import { deriveCommandId } from "@kickstart/contracts";
+import type { ProjectTabRecord, ResolvedCommandConfig } from "@kickstart/contracts";
+import { createCommandTabId, createEffectiveCommandId, deriveCommandId } from "@kickstart/contracts";
 
 import { envTextToRecord, getPreferredCommandTabId } from "./command-utils";
 
@@ -24,22 +24,28 @@ describe("envTextToRecord", () => {
   });
 });
 
-function createCommand(input: Partial<CommandConfig> & Pick<CommandConfig, "id">): CommandConfig {
+function createCommand(
+  input: Partial<ResolvedCommandConfig> & Pick<ResolvedCommandConfig, "sourceCommandId">,
+): ResolvedCommandConfig {
+  const id = input.id ?? createEffectiveCommandId("shared", input.sourceCommandId);
   return {
     command: "bun dev",
     cwd: ".",
-    id: input.id,
-    name: input.name ?? input.id,
+    id,
+    name: input.name ?? id,
+    source: input.source ?? "shared",
+    sourceCommandId: input.sourceCommandId,
     startMode: input.startMode ?? "manual",
     type: input.type ?? "service",
   };
 }
 
 function createCommandTab(commandId: string, sortOrder: number): ProjectTabRecord {
+  const effectiveCommandId = createEffectiveCommandId("shared", commandId);
   return {
-    commandId,
+    commandId: effectiveCommandId,
     createdAt: "2026-03-24T00:00:00.000Z",
-    id: `command:${commandId}`,
+    id: createCommandTabId(effectiveCommandId),
     kind: "command",
     projectId: "project-1",
     shellCwd: ".",
@@ -52,9 +58,9 @@ function createCommandTab(commandId: string, sortOrder: number): ProjectTabRecor
 describe("getPreferredCommandTabId", () => {
   it("prefers the first service command tab", () => {
     const commands = [
-      createCommand({ id: "build", type: "action" }),
-      createCommand({ id: "api", type: "service" }),
-      createCommand({ id: "web", type: "service" }),
+      createCommand({ sourceCommandId: "build", type: "action" }),
+      createCommand({ sourceCommandId: "api", type: "service" }),
+      createCommand({ sourceCommandId: "web", type: "service" }),
     ];
     const tabs = [
       createCommandTab("build", 0),
@@ -62,16 +68,20 @@ describe("getPreferredCommandTabId", () => {
       createCommandTab("web", 2),
     ];
 
-    expect(getPreferredCommandTabId(commands, tabs)).toBe("command:api");
+    expect(getPreferredCommandTabId(commands, tabs)).toBe(
+      createCommandTabId(createEffectiveCommandId("shared", "api")),
+    );
   });
 
   it("falls back to the first action command tab when no service exists", () => {
     const commands = [
-      createCommand({ id: "build", type: "action" }),
-      createCommand({ id: "lint", type: "action" }),
+      createCommand({ sourceCommandId: "build", type: "action" }),
+      createCommand({ sourceCommandId: "lint", type: "action" }),
     ];
     const tabs = [createCommandTab("build", 0), createCommandTab("lint", 1)];
 
-    expect(getPreferredCommandTabId(commands, tabs)).toBe("command:build");
+    expect(getPreferredCommandTabId(commands, tabs)).toBe(
+      createCommandTabId(createEffectiveCommandId("shared", "build")),
+    );
   });
 });

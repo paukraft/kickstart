@@ -35,12 +35,13 @@ export type ProjectRuntimeState =
   | "stopping";
 
 export interface ProjectWithRuntime {
-  configExists: boolean;
   groupId: string | null;
+  hasCommands: boolean;
   iconUrl: string | null;
   id: string;
   name: string;
   path: string;
+  sharedConfigExists: boolean;
   startupCommandCount: number;
   runningCommandCount: number;
   runtimeState: ProjectRuntimeState;

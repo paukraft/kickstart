@@ -9,6 +9,7 @@ import {
   RiSettings4Line,
   RiStopLine,
   RiTerminalLine,
+  RiUserLine,
 } from "@remixicon/react";
 import { DragDropProvider } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
@@ -16,22 +17,28 @@ import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
 import { AnimatedBars, RUNTIME_COLORS, RUNTIME_RGB } from "@/components/app/runtime-indicators";
-import type {
-  CommandConfig,
-  ProjectTabRecord,
-  ProjectWithRuntime,
-  TerminalSessionSnapshot,
+import {
+  createCommandTabId,
+  isActionCommand,
+  isServiceCommand,
+  type CommandSource,
+  type ProjectTabRecord,
+  type ProjectWithRuntime,
+  type ResolvedCommandConfig,
+  type TerminalSessionSnapshot,
 } from "@kickstart/contracts";
-import { isActionCommand, isServiceCommand } from "@kickstart/contracts";
 
 import { OpenInEditorControl } from "@/components/app/open-in-editor-control";
 import { Button } from "@/components/ui/button";
+import { commandByTabId } from "@/lib/command-utils";
+import { cn } from "@/lib/utils";
 
 function ActionItem({
   command,
   tab,
   session,
   active,
+  dragGroup,
   index,
   onSelect,
   onRun,
@@ -39,10 +46,11 @@ function ActionItem({
   onStop,
   onEdit,
 }: {
-  command: CommandConfig;
+  command: ResolvedCommandConfig;
   tab: ProjectTabRecord | undefined;
   session: TerminalSessionSnapshot | undefined;
   active: boolean;
+  dragGroup: string;
   index: number;
   onSelect: () => void;
   onRun: () => void;
@@ -50,9 +58,9 @@ function ActionItem({
   onStop: () => void;
   onEdit: () => void;
 }) {
-  const tabId = tab?.id ?? command.id;
+  const tabId = tab?.id ?? createCommandTabId(command.id);
   const { isDragging, ref } = useSortable({
-    group: "action",
+    group: dragGroup,
     id: tabId,
     index,
   });
@@ -72,11 +80,11 @@ function ActionItem({
         }
       }}
       className={cn(
-        "group relative flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors cursor-grab active:cursor-grabbing overflow-hidden",
+        "group relative flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors overflow-hidden cursor-pointer",
         active
           ? "bg-accent text-accent-foreground"
           : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-        isDragging && "opacity-65",
+        isDragging && "opacity-65 cursor-grabbing",
       )}
     >
       <AnimatePresence>
@@ -145,7 +153,16 @@ function ActionItem({
           <RiFlashlightLine className="size-3.5" />
         )}
       </div>
-      <span className="min-w-0 flex-1 truncate text-sm">{command.name}</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-sm font-medium leading-tight">{command.name}</span>
+          {command.source === "local" && (
+            <span className="shrink-0 text-amber-500/60 dark:text-amber-400/50" title="Personal command (not shared with team)">
+              <RiUserLine className="size-3" />
+            </span>
+          )}
+        </div>
+      </div>
       <div className="desktop-no-drag flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
         {tab && (
           <>
@@ -210,12 +227,16 @@ function ActionItem({
     </div>
   );
 }
-import { commandByTabId } from "@/lib/command-utils";
-import { cn } from "@/lib/utils";
+
+const COMMAND_SOURCE_SECTIONS = [
+  { source: "shared" },
+  { source: "local" },
+] as const satisfies ReadonlyArray<{ source: CommandSource }>;
 
 interface TabItemProps {
   active: boolean;
   isLoading?: boolean;
+  isPersonal?: boolean;
   isRunning?: boolean;
   kind: "command" | "shell";
   title: string;
@@ -230,6 +251,7 @@ interface TabItemProps {
 function TabItem({
   active,
   isLoading = false,
+  isPersonal = false,
   isRunning = false,
   kind,
   title,
@@ -259,11 +281,11 @@ function TabItem({
       role="button"
       tabIndex={0}
       className={cn(
-        "group relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-all overflow-hidden",
+        "group relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-all overflow-hidden cursor-pointer",
         active
           ? "bg-accent text-accent-foreground"
           : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-        "cursor-grab active:cursor-grabbing",
+        isDragging && "cursor-grabbing",
         isDragging && "opacity-65",
       )}
     >
@@ -359,6 +381,11 @@ function TabItem({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <p className="truncate text-sm font-medium leading-tight">{title}</p>
+            {isPersonal && (
+              <span className="shrink-0 text-amber-500/60 dark:text-amber-400/50" title="Personal command (not shared with team)">
+                <RiUserLine className="size-3" />
+              </span>
+            )}
           </div>
           <p className="truncate text-xs leading-tight text-muted-foreground">{subtitle}</p>
         </div>
@@ -392,7 +419,7 @@ function SectionHeader({
 
 export interface ProjectSidebarProps {
   project: ProjectWithRuntime | null;
-  commands: CommandConfig[];
+  commands: ResolvedCommandConfig[];
   commandTabs: ProjectTabRecord[];
   shellTabs: ProjectTabRecord[];
   activeTabId: string | null;
@@ -402,17 +429,23 @@ export interface ProjectSidebarProps {
   onRunTab: (tab: ProjectTabRecord) => void;
   onRestartTab: (tab: ProjectTabRecord) => void;
   onStopTab: (tab: ProjectTabRecord) => void;
-  onEditCommand: (command: CommandConfig) => void;
+  onEditCommand: (command: ResolvedCommandConfig) => void;
   onAddCommand: () => void;
   onCreateShellTab: () => void;
   onDeleteShellTab: (tabId: string) => void;
-  onReorderCommands: (sourceId: string, targetId: string) => void;
+  onReorderCommands: (
+    source: CommandSource,
+    type: ResolvedCommandConfig["type"],
+    sourceId: string,
+    targetId: string,
+  ) => void;
   onReorderShellTabs: (sourceId: string, targetId: string) => void;
 }
 
 function SortableTabItem({
   activeTabId,
   commands,
+  dragGroup,
   onDeleteShellTab,
   onEditCommand,
   onRunTab,
@@ -423,9 +456,10 @@ function SortableTabItem({
   terminalSessions,
 }: {
   activeTabId: string | null;
-  commands: CommandConfig[];
+  commands: ResolvedCommandConfig[];
+  dragGroup: string;
   onDeleteShellTab: (tabId: string) => void;
-  onEditCommand: (command: CommandConfig) => void;
+  onEditCommand: (command: ResolvedCommandConfig) => void;
   onRunTab: (tab: ProjectTabRecord) => void;
   onRestartTab: (tab: ProjectTabRecord) => void;
   onSelectTab: (tabId: string) => void;
@@ -434,7 +468,7 @@ function SortableTabItem({
   terminalSessions: Record<string, TerminalSessionSnapshot>;
 }) {
   const { isDragging, ref } = useSortable({
-    group: tab.kind,
+    group: dragGroup,
     id: tab.id,
     index: tab.sortOrder,
   });
@@ -446,7 +480,7 @@ function SortableTabItem({
   const subtitle = session?.lastCommand
     ? `Last: ${session.lastCommand}`
     : tab.kind === "command"
-      ? `${command?.type === "action" ? "Action" : "Service"} · ${command?.startMode === "auto" ? "Auto" : "Manual"} · ${command?.command ?? "—"}`
+      ? `${command?.source === "local" ? "Personal" : "Shared"} · ${command?.type === "action" ? "Action" : "Service"} · ${command?.startMode === "auto" ? "Auto" : "Manual"}`
       : "Shell";
 
   return (
@@ -454,6 +488,7 @@ function SortableTabItem({
       active={activeTabId === tab.id}
       isDragging={isDragging}
       isLoading={isLoading}
+      isPersonal={command?.source === "local"}
       isRunning={isRunning}
       kind={tab.kind}
       itemRef={ref as (element: HTMLDivElement | null) => void}
@@ -575,11 +610,23 @@ export function ProjectSidebar({
   const actionsStateKey = project?.id ?? "general";
   const actionsOpen = actionsOpenByProject[actionsStateKey] ?? false;
   const actionCommands = commands.filter(isActionCommand);
-  const visibleCommandTabs = commandTabs.filter((tab) => {
+  const serviceTabs = commandTabs.filter((tab) => {
     const command = commandByTabId(commands, tab.id);
     if (!command) return false;
     return isServiceCommand(command);
   });
+  const actionCommandsBySource = {
+    local: actionCommands.filter((command) => command.source === "local"),
+    shared: actionCommands.filter((command) => command.source === "shared"),
+  } satisfies Record<CommandSource, ResolvedCommandConfig[]>;
+  const serviceTabsBySource = {
+    local: serviceTabs.filter(
+      (tab) => commandByTabId(commands, tab.id)?.source === "local",
+    ),
+    shared: serviceTabs.filter(
+      (tab) => commandByTabId(commands, tab.id)?.source === "shared",
+    ),
+  } satisfies Record<CommandSource, ProjectTabRecord[]>;
   const showActions = actionCommands.length > 0 && actionsOpen;
   const activeActionTab =
     activeTabId == null
@@ -618,6 +665,99 @@ export function ProjectSidebar({
       if (nextSourceId === nextTargetId) return;
       onReorder(nextSourceId, nextTargetId);
     };
+  }
+
+  function renderSourceActions(source: CommandSource) {
+    const sourceActions = actionCommandsBySource[source];
+    if (sourceActions.length === 0) {
+      return null;
+    }
+
+    return (
+      <DragDropProvider
+        key={`actions-${source}`}
+        onDragEnd={createDragEndHandler((sourceId, targetId) =>
+          onReorderCommands(source, "action", sourceId, targetId),
+        )}
+      >
+        <div className="space-y-0.5">
+          <AnimatePresence initial={false}>
+            {sourceActions.map((command, index) => {
+              const tabId = createCommandTabId(command.id);
+              const tab = commandTabs.find((item) => item.id === tabId);
+              const session = terminalSessions[tabId];
+              const isActiveAction = activeActionCommand?.id === command.id;
+              const isVisible = showActions || isActiveAction;
+
+              if (!isVisible) {
+                return null;
+              }
+
+              return (
+                <motion.div
+                  key={command.id}
+                  layout
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="overflow-hidden"
+                >
+                  <ActionItem
+                    active={activeTabId === tab?.id}
+                    command={command}
+                    dragGroup={`action-${source}`}
+                    index={index}
+                    onEdit={() => onEditCommand(command)}
+                    onRestart={() => tab && onRestartTab(tab)}
+                    onRun={() => tab && onRunTab(tab)}
+                    onSelect={() => tab && onSelectTab(tab.id)}
+                    onStop={() => tab && onStopTab(tab)}
+                    session={session}
+                    tab={tab}
+                  />
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>
+      </DragDropProvider>
+    );
+  }
+
+  function renderSourceServices(source: CommandSource) {
+    const sourceTabs = serviceTabsBySource[source];
+    if (sourceTabs.length === 0) {
+      return null;
+    }
+
+    return (
+      <DragDropProvider
+        key={`services-${source}`}
+        onDragEnd={createDragEndHandler((sourceId, targetId) =>
+          onReorderCommands(source, "service", sourceId, targetId),
+        )}
+      >
+        <div className="space-y-0.5">
+          {sourceTabs.map((tab, index) => (
+            <SortableTabItem
+              key={tab.id}
+              activeTabId={activeTabId}
+              commands={commands}
+              dragGroup={`command-${source}`}
+              onDeleteShellTab={onDeleteShellTab}
+              onEditCommand={onEditCommand}
+              onRunTab={onRunTab}
+              onRestartTab={onRestartTab}
+              onSelectTab={onSelectTab}
+              onStopTab={onStopTab}
+              tab={{ ...tab, sortOrder: index }}
+              terminalSessions={terminalSessions}
+            />
+          ))}
+        </div>
+      </DragDropProvider>
+    );
   }
 
   return (
@@ -663,68 +803,11 @@ export function ProjectSidebar({
                   transition={{ duration: 0.15 }}
                   className="overflow-hidden"
                 >
-                  <DragDropProvider onDragEnd={createDragEndHandler(onReorderCommands)}>
-                    <div className="space-y-0.5">
-                      <AnimatePresence initial={false}>
-                        {actionCommands.map((command, index) => {
-                          const tabId = `command:${command.id}`;
-                          const tab = commandTabs.find((item) => item.id === tabId);
-                          const session = terminalSessions[tabId];
-                          const isActiveAction = activeActionCommand?.id === command.id;
-                          const isVisible = showActions || isActiveAction;
-
-                          if (!isVisible) return null;
-
-                          return (
-                            <motion.div
-                              key={command.id}
-                              layout
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              transition={{ duration: 0.15 }}
-                              className="overflow-hidden"
-                            >
-                              <ActionItem
-                                command={command}
-                                tab={tab}
-                                session={session}
-                                active={activeTabId === tab?.id}
-                                index={index}
-                                onSelect={() => tab && onSelectTab(tab.id)}
-                                onRun={() => tab && onRunTab(tab)}
-                                onRestart={() => tab && onRestartTab(tab)}
-                                onStop={() => tab && onStopTab(tab)}
-                                onEdit={() => onEditCommand(command)}
-                              />
-                            </motion.div>
-                          );
-                        })}
-                      </AnimatePresence>
-                    </div>
-                  </DragDropProvider>
+                  <div className="space-y-0.5">{COMMAND_SOURCE_SECTIONS.map((section) => renderSourceActions(section.source))}</div>
                 </motion.div>
               ) : null}
-              {visibleCommandTabs.length > 0 ? (
-                <DragDropProvider onDragEnd={createDragEndHandler(onReorderCommands)}>
-                  <div className="space-y-0.5">
-                    {visibleCommandTabs.map((tab, index) => (
-                      <SortableTabItem
-                        key={tab.id}
-                        activeTabId={activeTabId}
-                        commands={commands}
-                        onDeleteShellTab={onDeleteShellTab}
-                        onEditCommand={onEditCommand}
-                        onRunTab={onRunTab}
-                        onRestartTab={onRestartTab}
-                        onSelectTab={onSelectTab}
-                        onStopTab={onStopTab}
-                        tab={{ ...tab, sortOrder: index }}
-                        terminalSessions={terminalSessions}
-                      />
-                    ))}
-                  </div>
-                </DragDropProvider>
+              {serviceTabs.length > 0 ? (
+                <div className="space-y-0.5">{COMMAND_SOURCE_SECTIONS.map((section) => renderSourceServices(section.source))}</div>
               ) : (
                 <p className="py-4 text-center text-xs text-muted-foreground">
                   {commands.length === 0
@@ -745,6 +828,7 @@ export function ProjectSidebar({
                     key={tab.id}
                     activeTabId={activeTabId}
                     commands={commands}
+                    dragGroup="shell"
                     onDeleteShellTab={onDeleteShellTab}
                     onEditCommand={onEditCommand}
                     onRunTab={onRunTab}
