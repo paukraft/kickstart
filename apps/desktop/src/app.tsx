@@ -4,6 +4,7 @@ import {
   RiErrorWarningLine,
   RiLoader4Line,
   RiPlayFill,
+  RiRefreshLine,
   RiStopFill,
 } from "@remixicon/react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
@@ -43,6 +44,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { commandByTabId, getPreferredCommandTabId } from "@/lib/command-utils";
@@ -366,41 +368,66 @@ export function App() {
       ),
     [railItems],
   );
-  const projectHeaderAction =
-    selectedProject?.runtimeState === "starting"
+  const projectHeaderControl = selectedProject
+    ? selectedProject.runtimeState === "running"
       ? {
-          icon: <RiLoader4Line className="animate-spin" />,
-          label: "Starting...",
-          onClick: () => {},
-          variant: "default" as const,
-        }
-      : selectedProject?.runtimeState === "stopping"
-        ? {
-            icon: <RiLoader4Line className="animate-spin" />,
-            label: "Stopping...",
-            onClick: () => {},
+          kind: "group" as const,
+          restart: {
+            ariaLabel: "Restart project commands",
+            icon: <RiRefreshLine />,
+            onClick: () => void handleRestartProject(),
+          },
+          stop: {
+            icon: <RiStopFill />,
+            label: "Stop",
+            onClick: () => void handleStopProject(),
             variant: "outline" as const,
+          },
+        }
+      : selectedProject.runtimeState === "starting"
+        ? {
+            kind: "button" as const,
+            button: {
+              disabled: true,
+              icon: <RiLoader4Line className="animate-spin" />,
+              label: "Starting...",
+              onClick: () => {},
+              variant: "default" as const,
+            },
           }
-        : selectedProject?.runtimeState === "running"
+        : selectedProject.runtimeState === "stopping"
           ? {
-              icon: <RiStopFill />,
-              label: "Stop",
-              onClick: () => void handleStopProject(),
-              variant: "outline" as const,
+              kind: "button" as const,
+              button: {
+                disabled: true,
+                icon: <RiLoader4Line className="animate-spin" />,
+                label: "Stopping...",
+                onClick: () => {},
+                variant: "outline" as const,
+              },
             }
-          : selectedProject?.runtimeState === "partially-running"
+          : selectedProject.runtimeState === "partially-running"
             ? {
-                icon: <RiPlayFill />,
-                label: "Start Missing",
-                onClick: () => void handleRunProject(),
-                variant: "default" as const,
+                kind: "button" as const,
+                button: {
+                  disabled: false,
+                  icon: <RiPlayFill />,
+                  label: "Start Missing",
+                  onClick: () => void handleRunProject(),
+                  variant: "default" as const,
+                },
               }
             : {
-                icon: <RiPlayFill />,
-                label: "Start",
-                onClick: () => void handleRunProject(),
-                variant: "default" as const,
-              };
+                kind: "button" as const,
+                button: {
+                  disabled: selectedProject.startupCommandCount === 0,
+                  icon: <RiPlayFill />,
+                  label: "Start",
+                  onClick: () => void handleRunProject(),
+                  variant: "default" as const,
+                },
+              }
+    : null;
 
   function resolveSelectedTabId(
     nextTabs: ProjectTabRecord[],
@@ -728,6 +755,13 @@ export function App() {
   async function handleStopProject() {
     if (!selectedProject) return;
     await window.desktop.stopProjectStart(selectedProject.id);
+    await refreshTerminalSessions(selectedProject.id);
+    await refreshProjects({ keepSelection: true });
+  }
+
+  async function handleRestartProject() {
+    if (!selectedProject) return;
+    await window.desktop.restartProjectStart(selectedProject.id);
     await refreshTerminalSessions(selectedProject.id);
     await refreshProjects({ keepSelection: true });
   }
@@ -1326,20 +1360,37 @@ export function App() {
                 </h1>
               )}
 
-              {selectedProject ? (
+              {projectHeaderControl?.kind === "group" ? (
+                <ButtonGroup className="desktop-no-drag shrink-0">
+                  <Button
+                    aria-label={projectHeaderControl.restart.ariaLabel}
+                    className="shrink-0"
+                    size="icon-xs"
+                    variant="outline"
+                    onClick={projectHeaderControl.restart.onClick}
+                  >
+                    {projectHeaderControl.restart.icon}
+                  </Button>
+                  <Button
+                    className="shrink-0"
+                    size="xs"
+                    variant={projectHeaderControl.stop.variant}
+                    onClick={projectHeaderControl.stop.onClick}
+                  >
+                    {projectHeaderControl.stop.icon}
+                    {projectHeaderControl.stop.label}
+                  </Button>
+                </ButtonGroup>
+              ) : projectHeaderControl ? (
                 <Button
                   className="desktop-no-drag shrink-0"
-                  disabled={
-                    selectedProject.startupCommandCount === 0 ||
-                    selectedProject.runtimeState === "starting" ||
-                    selectedProject.runtimeState === "stopping"
-                  }
+                  disabled={projectHeaderControl.button.disabled}
                   size="xs"
-                  variant={projectHeaderAction.variant}
-                  onClick={projectHeaderAction.onClick}
+                  variant={projectHeaderControl.button.variant}
+                  onClick={projectHeaderControl.button.onClick}
                 >
-                  {projectHeaderAction.icon}
-                  {projectHeaderAction.label}
+                  {projectHeaderControl.button.icon}
+                  {projectHeaderControl.button.label}
                 </Button>
               ) : null}
 

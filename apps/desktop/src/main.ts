@@ -828,6 +828,12 @@ async function ensureProjectTabAvailable(projectId: string, tabId: string) {
   });
 }
 
+async function getProjectStartupCommands(projectId: string) {
+  const payload = await configPayloadForProject(projectId);
+  await syncProjectTabs(projectId, payload);
+  return resolveProjectCommands(payload).filter(isAutoStartCommand);
+}
+
 async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
   const projects = getStore().listProjects();
   return Promise.all(
@@ -1369,9 +1375,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("kickstart:run-project-start", async (_event, projectId: string) => {
-    const payload = await configPayloadForProject(projectId);
-    await syncProjectTabsForProject(projectId);
-    const startupCommands = resolveProjectCommands(payload).filter(isAutoStartCommand);
+    const startupCommands = await getProjectStartupCommands(projectId);
 
     await Promise.all(
       startupCommands.map(async (command) => {
@@ -1388,14 +1392,30 @@ function registerIpcHandlers() {
     );
   });
 
+  ipcMain.handle("kickstart:restart-project-start", async (_event, projectId: string) => {
+    const startupCommands = await getProjectStartupCommands(projectId);
+
+    await Promise.all(
+      startupCommands.map((command) =>
+        getTerminalManager().restartCommand({
+          projectId,
+          tabId: createCommandTabId(command.id),
+        }),
+      ),
+    );
+  });
+
   ipcMain.handle("kickstart:stop-project-start", async (_event, projectId: string) => {
-    const payload = await configPayloadForProject(projectId);
-    for (const command of resolveProjectCommands(payload).filter(isAutoStartCommand)) {
-      await getTerminalManager().stopCommand({
-        projectId,
-        tabId: createCommandTabId(command.id),
-      });
-    }
+    const startupCommands = await getProjectStartupCommands(projectId);
+
+    await Promise.all(
+      startupCommands.map((command) =>
+        getTerminalManager().stopCommand({
+          projectId,
+          tabId: createCommandTabId(command.id),
+        }),
+      ),
+    );
   });
 }
 

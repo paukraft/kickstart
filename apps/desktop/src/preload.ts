@@ -39,6 +39,7 @@ const desktopBridge: DesktopBridge = {
   reorderProjectsInGroup: (input) => ipcRenderer.invoke("kickstart:reorder-projects-in-group", input),
   reorderRail: (input) => ipcRenderer.invoke("kickstart:reorder-rail", input),
   reorderTabs: (input) => ipcRenderer.invoke("kickstart:reorder-tabs", input),
+  restartProjectStart: (projectId) => ipcRenderer.invoke("kickstart:restart-project-start", projectId),
   restartTerminalCommand: (input) => ipcRenderer.invoke("kickstart:terminal-restart", input),
   runProjectStart: (projectId) => ipcRenderer.invoke("kickstart:run-project-start", projectId),
   runTerminalCommand: (input) => ipcRenderer.invoke("kickstart:terminal-run", input),

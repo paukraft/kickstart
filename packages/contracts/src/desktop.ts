@@ -224,6 +224,7 @@ export interface DesktopBridge {
   reorderProjectsInGroup: (input: ReorderProjectsInGroupInput) => Promise<void>;
   reorderRail: (input: ReorderRailInput) => Promise<void>;
   reorderTabs: (input: ReorderTabsInput) => Promise<ProjectTabState>;
+  restartProjectStart: (projectId: string) => Promise<void>;
   runProjectStart: (projectId: string) => Promise<void>;
   restartTerminalCommand: (input: TerminalRestartInput) => Promise<void>;
   runTerminalCommand: (input: TerminalRunInput) => Promise<void>;
