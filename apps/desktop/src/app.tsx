@@ -21,6 +21,7 @@ import {
   type ProjectWithRuntime,
   type ResolvedCommandConfig,
   type ShortcutActionId,
+  type TerminalEvent,
   type TerminalSessionSnapshot,
 } from "@kickstart/contracts";
 import { resolveMergedKickstartConfig } from "@kickstart/core";
@@ -165,6 +166,12 @@ function getSessionEventKey(projectId: string, tabId: string) {
 }
 
 const ACTION_COMPLETION_CONFIRM_DELAY_MS = 400;
+const RUNTIME_EVENT_TYPES = new Set<TerminalEvent["type"]>([
+  "started",
+  "stopped",
+  "cleared",
+  "updated",
+]);
 
 function showsSidebarStartAction(session: TerminalSessionSnapshot | undefined) {
   return (
@@ -243,6 +250,115 @@ export function mergeSelectedProjectRuntime(
   };
 }
 
+export function resolveSelectedProjectId(args: {
+  currentSelectedProjectId: string | null;
+  keepSelection?: boolean;
+  persistedSelectedProjectId: string | null;
+  projects: ProjectWithRuntime[];
+}) {
+  const { currentSelectedProjectId, keepSelection, persistedSelectedProjectId, projects } = args;
+
+  if (keepSelection) {
+    if (currentSelectedProjectId === GENERAL_SPACE_ID) {
+      return GENERAL_SPACE_ID;
+    }
+    if (
+      currentSelectedProjectId &&
+      projects.some((project) => project.id === currentSelectedProjectId)
+    ) {
+      return currentSelectedProjectId;
+    }
+  }
+
+  if (persistedSelectedProjectId === GENERAL_SPACE_ID) {
+    return GENERAL_SPACE_ID;
+  }
+  if (
+    persistedSelectedProjectId &&
+    projects.some((project) => project.id === persistedSelectedProjectId)
+  ) {
+    return persistedSelectedProjectId;
+  }
+
+  return GENERAL_SPACE_ID;
+}
+
+export function resolveSelectedTabId(
+  nextTabs: ProjectTabRecord[],
+  preferredTabId: string | null,
+) {
+  if (preferredTabId && nextTabs.some((tab) => tab.id === preferredTabId)) {
+    return preferredTabId;
+  }
+
+  return nextTabs[0]?.id ?? null;
+}
+
+export function resolveRefreshedSelectedTabId(args: {
+  currentSelectedTabId: string | null;
+  nextTabs: ProjectTabRecord[];
+  persistedActiveTabId: string | null;
+  previousProjectId: string | null;
+  projectId: string;
+}) {
+  const preferredTabId =
+    args.previousProjectId === args.projectId
+      ? (args.currentSelectedTabId ?? args.persistedActiveTabId)
+      : args.persistedActiveTabId;
+
+  return resolveSelectedTabId(args.nextTabs, preferredTabId);
+}
+
+export function shouldClearPendingProjectSettingsId(args: {
+  pendingProjectSettingsId: string | null;
+  selectedProjectId: string | null;
+}) {
+  return Boolean(
+    args.pendingProjectSettingsId &&
+      args.selectedProjectId &&
+      args.pendingProjectSettingsId !== args.selectedProjectId,
+  );
+}
+
+export function shouldOpenPendingProjectSettings(args: {
+  hydratedProjectId: string | null;
+  pendingProjectSettingsId: string | null;
+}) {
+  return Boolean(
+    args.pendingProjectSettingsId &&
+      args.hydratedProjectId === args.pendingProjectSettingsId,
+  );
+}
+
+export function shouldProcessVisibleProjectTerminalEvent(args: {
+  displayedProjectId: string | null;
+  event: Pick<TerminalEvent, "projectId" | "type">;
+}) {
+  return Boolean(
+    args.displayedProjectId &&
+      args.event.projectId === args.displayedProjectId &&
+      RUNTIME_EVENT_TYPES.has(args.event.type),
+  );
+}
+
+export function shouldBlockProjectScopedShortcut(args: {
+  actionId: ShortcutActionId;
+  isProjectStateLoading: boolean;
+}) {
+  if (!args.isProjectStateLoading) {
+    return false;
+  }
+
+  return (
+    getShortcutTabIndex(args.actionId) !== null ||
+    args.actionId === "new-shell-tab" ||
+    args.actionId === "close-tab" ||
+    args.actionId === "select-previous-tab" ||
+    args.actionId === "select-next-tab" ||
+    args.actionId === "open-project-settings"
+  );
+}
+
 function getDefaultCreateCommandSource(
   projectConfig: ProjectConfigPayload | null,
 ): CommandSource {
@@ -273,6 +389,22 @@ export function getBrokenSharedConfigBanner(args: {
   };
 }
 
+interface ProjectStateSnapshot {
+  projectConfig: ProjectConfigPayload | null;
+  projectConfigProjectId: string | null;
+  selectedTabId: string | null;
+  tabs: ProjectTabRecord[];
+  terminalSessions: Record<string, TerminalSessionSnapshot>;
+}
+
+interface LoadedProjectStateSnapshot {
+  persistedActiveTabId: string | null;
+  projectConfig: ProjectConfigPayload | null;
+  projectConfigProjectId: string | null;
+  tabs: ProjectTabRecord[];
+  terminalSessions: Record<string, TerminalSessionSnapshot>;
+}
+
 export function App() {
   // ── Core state ──────────────────────────────────────────────
   const [projects, setProjects] = useState<ProjectWithRuntime[]>([]);
@@ -287,6 +419,7 @@ export function App() {
   const [terminalSessions, setTerminalSessions] = useState<
     Record<string, TerminalSessionSnapshot>
   >({});
+  const [hydratedProjectId, setHydratedProjectId] = useState<string | null>(null);
   const [projectConfigProjectId, setProjectConfigProjectId] = useState<string | null>(null);
   // ── Dialog state ────────────────────────────────────────────
   const [commandDialogState, setCommandDialogState] =
@@ -294,6 +427,8 @@ export function App() {
   const [projectCommandMenuOpen, setProjectCommandMenuOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
+  const [pendingDeleteProjectId, setPendingDeleteProjectId] = useState<string | null>(null);
+  const [pendingProjectSettingsId, setPendingProjectSettingsId] = useState<string | null>(null);
   const [pendingShellCloseTabId, setPendingShellCloseTabId] = useState<
     string | null
   >(null);
@@ -305,13 +440,18 @@ export function App() {
     null,
   );
   const selectedProjectIdRef = useRef<string | null>(selectedProjectId);
+  const selectedTabIdRef = useRef<string | null>(selectedTabId);
   const projectListRequestRef = useRef(0);
   const projectStateRequestRef = useRef(0);
   const terminalSessionsRequestRef = useRef(0);
+  const hydratedProjectIdRef = useRef<string | null>(null);
+  const displayedProjectIdRef = useRef<string | null>(null);
+  const projectStateCacheRef = useRef<Record<string, ProjectStateSnapshot>>({});
   const previousTerminalSessionsRef = useRef<Record<string, TerminalSessionSnapshot>>({});
   const latestTerminalSessionsRef = useRef<Record<string, TerminalSessionSnapshot>>({});
   const pendingCompletionSoundTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   selectedProjectIdRef.current = selectedProjectId;
+  selectedTabIdRef.current = selectedTabId;
   latestTerminalSessionsRef.current = terminalSessions;
 
   // ── Derived ─────────────────────────────────────────────────
@@ -327,10 +467,11 @@ export function App() {
     },
     [projectConfig],
   );
-  const selectedProject = useMemo(
+  const displayedProjectId = hydratedProjectId ?? selectedProjectId;
+  const displayedProject = useMemo(
     () =>
       mergeSelectedProjectRuntime(
-        projects.find((p) => p.id === selectedProjectId) ?? null,
+        projects.find((p) => p.id === displayedProjectId) ?? null,
         {
           hasCommands: commands.length > 0,
           sharedConfigExists: projectConfig?.shared.configExists ?? false,
@@ -338,14 +479,21 @@ export function App() {
         },
         {
           isCurrentProjectConfig:
-            selectedProjectId !== null &&
-            selectedProjectId !== GENERAL_SPACE_ID &&
-            projectConfigProjectId === selectedProjectId,
+            displayedProjectId !== null &&
+            displayedProjectId !== GENERAL_SPACE_ID &&
+            projectConfigProjectId === displayedProjectId,
         },
       ),
-    [commands, projectConfig, projectConfigProjectId, projects, selectedProjectId],
+    [commands, displayedProjectId, projectConfig, projectConfigProjectId, projects],
   );
-  const isGeneralSpaceSelected = selectedProjectId === GENERAL_SPACE_ID;
+  const pendingDeleteProject = useMemo(
+    () => projects.find((project) => project.id === pendingDeleteProjectId) ?? null,
+    [pendingDeleteProjectId, projects],
+  );
+  displayedProjectIdRef.current = displayedProjectId;
+  const isGeneralSpaceSelected = displayedProjectId === GENERAL_SPACE_ID;
+  const isProjectStateLoading =
+    selectedProjectId !== null && selectedProjectId !== hydratedProjectId;
   const activeTab =
     tabs.find((t) => t.id === selectedTabId) ??
     tabs[0] ??
@@ -368,8 +516,8 @@ export function App() {
       ),
     [railItems],
   );
-  const projectHeaderControl = selectedProject
-    ? selectedProject.runtimeState === "running"
+  const projectHeaderControl = displayedProject
+    ? displayedProject.runtimeState === "running"
       ? {
           kind: "group" as const,
           restart: {
@@ -384,7 +532,7 @@ export function App() {
             variant: "outline" as const,
           },
         }
-      : selectedProject.runtimeState === "starting"
+      : displayedProject.runtimeState === "starting"
         ? {
             kind: "button" as const,
             button: {
@@ -395,7 +543,7 @@ export function App() {
               variant: "default" as const,
             },
           }
-        : selectedProject.runtimeState === "stopping"
+        : displayedProject.runtimeState === "stopping"
           ? {
               kind: "button" as const,
               button: {
@@ -406,7 +554,7 @@ export function App() {
                 variant: "outline" as const,
               },
             }
-          : selectedProject.runtimeState === "partially-running"
+          : displayedProject.runtimeState === "partially-running"
             ? {
                 kind: "button" as const,
                 button: {
@@ -420,7 +568,7 @@ export function App() {
             : {
                 kind: "button" as const,
                 button: {
-                  disabled: selectedProject.startupCommandCount === 0,
+                  disabled: displayedProject.startupCommandCount === 0,
                   icon: <RiPlayFill />,
                   label: "Start",
                   onClick: () => void handleRunProject(),
@@ -429,16 +577,6 @@ export function App() {
               }
     : null;
 
-  function resolveSelectedTabId(
-    nextTabs: ProjectTabRecord[],
-    preferredTabId: string | null,
-  ) {
-    if (preferredTabId && nextTabs.some((tab) => tab.id === preferredTabId)) {
-      return preferredTabId;
-    }
-    return nextTabs[0]?.id ?? null;
-  }
-
   // ── Data fetching ───────────────────────────────────────────
   function mapSessionsByTabId(sessions: TerminalSessionSnapshot[]) {
     return Object.fromEntries(
@@ -446,79 +584,179 @@ export function App() {
     );
   }
 
+  function applyProjectStateSnapshot(
+    projectId: string,
+    snapshot: ProjectStateSnapshot,
+  ) {
+    setProjectConfig(snapshot.projectConfig);
+    setProjectConfigProjectId(snapshot.projectConfigProjectId);
+    setTerminalSessions(snapshot.terminalSessions);
+    setTabs(snapshot.tabs);
+    setSelectedTabId(snapshot.selectedTabId);
+    setHydratedProjectId(projectId);
+    hydratedProjectIdRef.current = projectId;
+  }
+
+  async function loadProjectStateSnapshot(
+    projectId: string,
+  ): Promise<LoadedProjectStateSnapshot> {
+    if (projectId === GENERAL_SPACE_ID) {
+      const [sessions, tabs] = await Promise.all([
+        window.desktop.getProjectTerminalSessions(projectId),
+        window.desktop.getProjectTabs(projectId),
+      ]);
+
+      return {
+        persistedActiveTabId: tabs.activeTabId,
+        projectConfig: null,
+        projectConfigProjectId: null,
+        tabs: tabs.tabs,
+        terminalSessions: mapSessionsByTabId(sessions),
+      };
+    }
+
+    const [config, sessions, tabs] = await Promise.all([
+      window.desktop.getProjectConfig(projectId),
+      window.desktop.getProjectTerminalSessions(projectId),
+      window.desktop.getProjectTabs(projectId),
+    ]);
+
+    return {
+      persistedActiveTabId: tabs.activeTabId,
+      projectConfig: config,
+      projectConfigProjectId: projectId,
+      tabs: tabs.tabs,
+      terminalSessions: mapSessionsByTabId(sessions),
+    };
+  }
+
   async function refreshProjects(options?: { keepSelection?: boolean }) {
     const requestId = ++projectListRequestRef.current;
-    const [items, groupItems] = await Promise.all([
+    const [items, groupItems, persistedSelectedProjectId] = await Promise.all([
       window.desktop.listProjects(),
       window.desktop.listGroups(),
+      window.desktop.getSelectedProjectId(),
     ]);
     if (requestId !== projectListRequestRef.current) {
       return { groups: groupItems, projects: items };
     }
+    const nextProjectIds = new Set([
+      GENERAL_SPACE_ID,
+      ...items.map((project) => project.id),
+    ]);
+    for (const projectId of Object.keys(projectStateCacheRef.current)) {
+      if (!nextProjectIds.has(projectId)) {
+        delete projectStateCacheRef.current[projectId];
+      }
+    }
     setProjects(items);
     setGroups(groupItems);
     setSelectedProjectId((current) => {
-      if (
-        options?.keepSelection &&
-        current &&
-        items.some((p) => p.id === current)
-      )
-        return current;
-      if (options?.keepSelection && current === GENERAL_SPACE_ID)
-        return current;
-      return GENERAL_SPACE_ID;
+      return resolveSelectedProjectId({
+        currentSelectedProjectId: current,
+        keepSelection: options?.keepSelection,
+        persistedSelectedProjectId,
+        projects: items,
+      });
     });
     return { groups: groupItems, projects: items };
   }
 
   async function refreshProjectState(projectId: string) {
     const requestId = ++projectStateRequestRef.current;
-    if (projectId === GENERAL_SPACE_ID) {
-      const [sessions, tabs] = await Promise.all([
-        window.desktop.getProjectTerminalSessions(projectId),
-        window.desktop.getProjectTabs(projectId),
-      ]);
-      if (
-        requestId !== projectStateRequestRef.current ||
-        selectedProjectIdRef.current !== projectId
-      ) {
-        return;
-      }
-      setProjectConfig(null);
-      setProjectConfigProjectId(null);
-      setTerminalSessions(mapSessionsByTabId(sessions));
-      setTabs(tabs.tabs);
-      setSelectedTabId((current) =>
-        resolveSelectedTabId(tabs.tabs, current ?? tabs.activeTabId),
-      );
-      return;
-    }
-    const [config, sessions, tabs] = await Promise.all([
-      window.desktop.getProjectConfig(projectId),
-      window.desktop.getProjectTerminalSessions(projectId),
-      window.desktop.getProjectTabs(projectId),
-    ]);
+    const snapshot = await loadProjectStateSnapshot(projectId);
     if (
       requestId !== projectStateRequestRef.current ||
       selectedProjectIdRef.current !== projectId
     ) {
       return;
     }
-    setProjectConfig(config);
-    setProjectConfigProjectId(projectId);
-    setTerminalSessions(mapSessionsByTabId(sessions));
-    setTabs(tabs.tabs);
-    setSelectedTabId((current) =>
-      resolveSelectedTabId(tabs.tabs, current ?? tabs.activeTabId),
-    );
+    const previousProjectId = hydratedProjectIdRef.current;
+    applyProjectStateSnapshot(projectId, {
+      projectConfig: snapshot.projectConfig,
+      projectConfigProjectId: snapshot.projectConfigProjectId,
+      selectedTabId: resolveRefreshedSelectedTabId({
+        currentSelectedTabId: selectedTabIdRef.current,
+        nextTabs: snapshot.tabs,
+        persistedActiveTabId: snapshot.persistedActiveTabId,
+        previousProjectId,
+        projectId,
+      }),
+      tabs: snapshot.tabs,
+      terminalSessions: snapshot.terminalSessions,
+    });
   }
+
+  useEffect(() => {
+    const missingProjectIds = projects
+      .map((project) => project.id)
+      .filter(
+        (projectId) =>
+          projectId !== selectedProjectId &&
+          !projectStateCacheRef.current[projectId],
+      );
+    if (missingProjectIds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      for (const projectId of missingProjectIds) {
+        if (cancelled || projectStateCacheRef.current[projectId]) {
+          continue;
+        }
+
+        const snapshot = await loadProjectStateSnapshot(projectId);
+        if (cancelled || projectStateCacheRef.current[projectId]) {
+          continue;
+        }
+
+        projectStateCacheRef.current[projectId] = {
+          projectConfig: snapshot.projectConfig,
+          projectConfigProjectId: snapshot.projectConfigProjectId,
+          selectedTabId: resolveSelectedTabId(
+            snapshot.tabs,
+            snapshot.persistedActiveTabId,
+          ),
+          tabs: snapshot.tabs,
+          terminalSessions: snapshot.terminalSessions,
+        };
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projects, selectedProjectId]);
+
+  useEffect(() => {
+    if (!hydratedProjectId) {
+      return;
+    }
+
+    projectStateCacheRef.current[hydratedProjectId] = {
+      projectConfig,
+      projectConfigProjectId,
+      selectedTabId,
+      tabs,
+      terminalSessions,
+    };
+  }, [
+    hydratedProjectId,
+    projectConfig,
+    projectConfigProjectId,
+    selectedTabId,
+    tabs,
+    terminalSessions,
+  ]);
 
   async function refreshTerminalSessions(projectId: string) {
     const requestId = ++terminalSessionsRequestRef.current;
     const sessions = await window.desktop.getProjectTerminalSessions(projectId);
     if (
       requestId !== terminalSessionsRequestRef.current ||
-      selectedProjectIdRef.current !== projectId
+      displayedProjectIdRef.current !== projectId
     ) {
       return;
     }
@@ -528,7 +766,7 @@ export function App() {
   const refreshSelectedProjectRuntime = useEffectEvent(
     async (projectId: string) => {
       await refreshTerminalSessions(projectId);
-      if (selectedProjectIdRef.current !== projectId) {
+      if (displayedProjectIdRef.current !== projectId) {
         return;
       }
       await refreshProjects({ keepSelection: true });
@@ -615,22 +853,15 @@ export function App() {
 
   useEffect(() => {
     return window.desktop.watchTerminalEvents((event) => {
-      if (
-        !selectedProjectId ||
-        event.projectId !== selectedProjectId ||
-        (event.type !== "started" &&
-          event.type !== "stopped" &&
-          event.type !== "cleared" &&
-          event.type !== "updated")
-      ) {
+      if (!shouldProcessVisibleProjectTerminalEvent({ displayedProjectId, event })) {
         return;
       }
       void refreshSelectedProjectRuntime(event.projectId);
     });
-  }, [selectedProjectId]);
+  }, [displayedProjectId]);
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!displayedProjectId) {
       previousTerminalSessionsRef.current = {};
       return;
     }
@@ -652,7 +883,7 @@ export function App() {
         continue;
       }
 
-      const key = getSessionEventKey(selectedProjectId, tabId);
+      const key = getSessionEventKey(displayedProjectId, tabId);
       const pendingTimer = pendingCompletionSoundTimersRef.current[key];
       if (pendingTimer) {
         clearTimeout(pendingTimer);
@@ -660,7 +891,7 @@ export function App() {
       pendingCompletionSoundTimersRef.current[key] = setTimeout(() => {
         const latestSession = latestTerminalSessionsRef.current[tabId];
         if (didActionSidebarTransitionToStart(previousSession, latestSession)) {
-          void playActionCompletionSound(selectedProjectId, tabId);
+          void playActionCompletionSound(displayedProjectId, tabId);
         }
         delete pendingCompletionSoundTimersRef.current[key];
       }, ACTION_COMPLETION_CONFIRM_DELAY_MS);
@@ -676,16 +907,43 @@ export function App() {
     }
 
     previousTerminalSessionsRef.current = terminalSessions;
-  }, [commands, selectedProjectId, tabs, terminalSessions]);
+  }, [commands, displayedProjectId, tabs, terminalSessions]);
+
+  useEffect(() => {
+    if (
+      shouldClearPendingProjectSettingsId({
+        pendingProjectSettingsId,
+        selectedProjectId,
+      })
+    ) {
+      setPendingProjectSettingsId(null);
+    }
+  }, [pendingProjectSettingsId, selectedProjectId]);
 
   useEffect(() => {
     if (!selectedProjectId) {
       setProjectConfig(null);
+      setProjectConfigProjectId(null);
       setTerminalSessions({});
       setTabs([]);
       setSelectedTabId(null);
+      setHydratedProjectId(null);
+      setPendingProjectSettingsId(null);
+      setPendingShellCloseTabId(null);
+      hydratedProjectIdRef.current = null;
       return;
     }
+
+    if (hydratedProjectIdRef.current !== selectedProjectId) {
+      const cachedState = projectStateCacheRef.current[selectedProjectId];
+      if (cachedState) {
+        applyProjectStateSnapshot(selectedProjectId, cachedState);
+        previousTerminalSessionsRef.current = cachedState.terminalSessions;
+      }
+      setPendingShellCloseTabId(null);
+      setCommandDialogState(null);
+    }
+
     void window.desktop.selectProject({ projectId: selectedProjectId });
     void Promise.all([
       refreshProjectState(selectedProjectId),
@@ -694,8 +952,40 @@ export function App() {
   }, [selectedProjectId]);
 
   useEffect(() => {
+    if (
+      shouldOpenPendingProjectSettings({
+        hydratedProjectId,
+        pendingProjectSettingsId,
+      })
+    ) {
+      setPendingProjectSettingsId(null);
+      setCommandDialogState({ mode: "list" });
+    }
+  }, [hydratedProjectId, pendingProjectSettingsId]);
+
+  useEffect(() => {
     const unsubscribe = window.desktop.watchConfig((payload) => {
-      if (payload.projectId === selectedProjectId) {
+      const cachedState = projectStateCacheRef.current[payload.projectId];
+      const nextSelectedTabId = resolveSelectedTabId(
+        payload.tabs,
+        cachedState?.selectedTabId ??
+          (payload.projectId === displayedProjectIdRef.current
+            ? selectedTabIdRef.current
+            : null),
+      );
+      projectStateCacheRef.current[payload.projectId] = {
+        projectConfig: {
+          hasCommands: payload.hasCommands,
+          local: payload.local,
+          shared: payload.shared,
+        },
+        projectConfigProjectId: payload.projectId,
+        selectedTabId: nextSelectedTabId,
+        tabs: payload.tabs,
+        terminalSessions: cachedState?.terminalSessions ?? {},
+      };
+
+      if (payload.projectId === displayedProjectIdRef.current) {
         setProjectConfig({
           hasCommands: payload.hasCommands,
           local: payload.local,
@@ -703,14 +993,12 @@ export function App() {
         });
         setProjectConfigProjectId(payload.projectId);
         setTabs(payload.tabs);
-        setSelectedTabId((current) =>
-          resolveSelectedTabId(payload.tabs, current),
-        );
+        setSelectedTabId(nextSelectedTabId);
       }
       void refreshProjects({ keepSelection: true });
     });
     return unsubscribe;
-  }, [selectedProjectId]);
+  }, []);
 
   // ── Handlers ────────────────────────────────────────────────
   async function handleAddProject() {
@@ -722,20 +1010,25 @@ export function App() {
   }
 
   async function handleDeleteProject() {
-    if (!selectedProject) return;
-    await window.desktop.deleteProject(selectedProject.id);
+    if (!pendingDeleteProjectId) return;
+    await window.desktop.deleteProject(pendingDeleteProjectId);
     setDeleteDialogOpen(false);
-    await refreshProjects();
+    setPendingDeleteProjectId(null);
+    await refreshProjects(
+      pendingDeleteProjectId === selectedProjectId
+        ? undefined
+        : { keepSelection: true },
+    );
   }
 
   async function handleCreateConfig() {
-    if (!selectedProject) return;
+    if (!displayedProject) return;
     const payload = await window.desktop.createProjectConfig(
-      selectedProject.id,
+      displayedProject.id,
     );
     setProjectConfig(payload);
-    setProjectConfigProjectId(selectedProject.id);
-    await refreshProjectState(selectedProject.id);
+    setProjectConfigProjectId(displayedProject.id);
+    await refreshProjectState(displayedProject.id);
     openCreateCommandDialog("shared");
   }
 
@@ -746,53 +1039,53 @@ export function App() {
   }
 
   async function handleRunProject() {
-    if (!selectedProject) return;
-    await window.desktop.runProjectStart(selectedProject.id);
-    await refreshTerminalSessions(selectedProject.id);
+    if (!displayedProject) return;
+    await window.desktop.runProjectStart(displayedProject.id);
+    await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
   }
 
   async function handleStopProject() {
-    if (!selectedProject) return;
-    await window.desktop.stopProjectStart(selectedProject.id);
-    await refreshTerminalSessions(selectedProject.id);
+    if (!displayedProject) return;
+    await window.desktop.stopProjectStart(displayedProject.id);
+    await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
   }
 
   async function handleRestartProject() {
-    if (!selectedProject) return;
-    await window.desktop.restartProjectStart(selectedProject.id);
-    await refreshTerminalSessions(selectedProject.id);
+    if (!displayedProject) return;
+    await window.desktop.restartProjectStart(displayedProject.id);
+    await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
   }
 
   async function handleRunTab(tab: ProjectTabRecord) {
-    if (!selectedProject) return;
+    if (!displayedProject) return;
     await window.desktop.runTerminalCommand({
-      projectId: selectedProject.id,
+      projectId: displayedProject.id,
       tabId: tab.id,
     });
-    await refreshTerminalSessions(selectedProject.id);
+    await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
   }
 
   async function handleRestartTab(tab: ProjectTabRecord) {
-    if (!selectedProject) return;
+    if (!displayedProject) return;
     await window.desktop.restartTerminalCommand({
-      projectId: selectedProject.id,
+      projectId: displayedProject.id,
       tabId: tab.id,
     });
-    await refreshTerminalSessions(selectedProject.id);
+    await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
   }
 
   async function handleStopTab(tab: ProjectTabRecord) {
-    if (!selectedProject) return;
+    if (!displayedProject) return;
     await window.desktop.stopTerminalCommand({
-      projectId: selectedProject.id,
+      projectId: displayedProject.id,
       tabId: tab.id,
     });
-    await refreshTerminalSessions(selectedProject.id);
+    await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
   }
 
@@ -929,6 +1222,15 @@ export function App() {
       return;
     }
 
+    if (
+      shouldBlockProjectScopedShortcut({
+        actionId,
+        isProjectStateLoading,
+      })
+    ) {
+      return;
+    }
+
     const shortcutTabIndex = getShortcutTabIndex(actionId);
     if (shortcutTabIndex !== null) {
       await handleSelectTabByIndex(shortcutTabIndex);
@@ -962,8 +1264,12 @@ export function App() {
       return;
     }
 
-    if (actionId === "open-project-settings" && selectedProject) {
-      openProjectSettings(selectedProject.id);
+    if (
+      actionId === "open-project-settings" &&
+      selectedProjectId &&
+      selectedProjectId !== GENERAL_SPACE_ID
+    ) {
+      openProjectSettings(selectedProjectId);
     }
   }
 
@@ -1113,7 +1419,7 @@ export function App() {
     sourceId: string,
     targetId: string,
   ) {
-    if (!selectedProject || sourceId === targetId) return;
+    if (!displayedProject || sourceId === targetId) return;
     const next = reorderCommandsWithinSection({
       commandTabs,
       commands,
@@ -1124,9 +1430,9 @@ export function App() {
     });
     await window.desktop.reorderCommands({
       commandIds: next,
-      projectId: selectedProject.id,
+      projectId: displayedProject.id,
     });
-    await refreshProjectState(selectedProject.id);
+    await refreshProjectState(displayedProject.id);
   }
 
   async function handleReorderShellTabs(sourceId: string, targetId: string) {
@@ -1150,11 +1456,18 @@ export function App() {
 
   function openProjectSettings(projectId: string) {
     setSelectedProjectId(projectId);
-    setCommandDialogState({ mode: "list" });
+    if (hydratedProjectIdRef.current === projectId) {
+      setPendingProjectSettingsId(null);
+      setCommandDialogState({ mode: "list" });
+      return;
+    }
+
+    setCommandDialogState(null);
+    setPendingProjectSettingsId(projectId);
   }
 
   function requestDeleteProject(projectId: string) {
-    setSelectedProjectId(projectId);
+    setPendingDeleteProjectId(projectId);
     setDeleteDialogOpen(true);
   }
 
@@ -1163,8 +1476,8 @@ export function App() {
   }
 
   async function handleCommandsChanged() {
-    if (!selectedProject) return;
-    await refreshProjectState(selectedProject.id);
+    if (!displayedProject) return;
+    await refreshProjectState(displayedProject.id);
   }
 
   const onShortcutAction = useEffectEvent((actionId: ShortcutActionId) => {
@@ -1205,10 +1518,10 @@ export function App() {
   const isUpdateBannerDismissed =
     updateBannerKey !== null && updateBannerKey === dismissedBannerKey;
   const brokenSharedConfigBanner = getBrokenSharedConfigBanner({
-    project: selectedProject,
+    project: displayedProject,
     projectConfig,
     projectConfigProjectId,
-    selectedProjectId,
+    selectedProjectId: displayedProjectId,
   });
 
   return (
@@ -1337,19 +1650,26 @@ export function App() {
           />
 
           {/* Detail sidebar */}
-          <aside className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden border-r p-3">
+          <aside
+            className={[
+              "flex min-h-0 w-72 shrink-0 flex-col overflow-hidden border-r p-3",
+              isProjectStateLoading
+                ? "pointer-events-none"
+                : "pointer-events-auto",
+            ].join(" ")}
+          >
             <div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 bg-background">
-              {selectedProject ? (
+              {displayedProject ? (
                 <ProjectDropdown
                   mode="dropdown-menu"
-                  project={selectedProject}
+                  project={displayedProject}
                   triggerClassName="desktop-no-drag inline-flex max-w-[14rem] items-center gap-1 rounded-md px-1 py-0.5 text-left hover:bg-accent"
                   onOpenSettings={openProjectSettings}
                   onDeleteProject={requestDeleteProject}
                 >
                   <div className="inline-flex max-w-[14rem] items-center gap-1">
                     <h1 className="min-w-0 truncate text-sm font-semibold">
-                      {selectedProject.name}
+                      {displayedProject.name}
                     </h1>
                     <RiArrowDownSLine className="size-4 shrink-0 text-muted-foreground" />
                   </div>
@@ -1396,13 +1716,18 @@ export function App() {
 
               <AlertDialog
                 open={deleteDialogOpen}
-                onOpenChange={setDeleteDialogOpen}
+                onOpenChange={(open) => {
+                  setDeleteDialogOpen(open);
+                  if (!open) {
+                    setPendingDeleteProjectId(null);
+                  }
+                }}
               >
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>Delete project?</AlertDialogTitle>
                     <AlertDialogDescription>
-                      This will remove <strong>{selectedProject?.name}</strong>{" "}
+                      This will remove <strong>{pendingDeleteProject?.name}</strong>{" "}
                       from Kickstart. Your files on disk won't be affected.
                     </AlertDialogDescription>
                   </AlertDialogHeader>
@@ -1419,9 +1744,9 @@ export function App() {
               </AlertDialog>
             </div>
 
-            {selectedProject ? (
+            {displayedProject ? (
               <ProjectSidebar
-                project={selectedProject}
+                project={displayedProject}
                 commands={commands}
                 commandTabs={commandTabs}
                 shellTabs={shellTabs}
@@ -1474,31 +1799,40 @@ export function App() {
           </aside>
 
           {/* Main content */}
-          <main className="min-h-0 flex-1">
-            <MainContent
-              project={selectedProject}
-              workspaceId={selectedProjectId}
-              workspaceName={
-                isGeneralSpaceSelected ? GENERAL_SPACE_NAME : undefined
-              }
-              hasCommands={isGeneralSpaceSelected ? true : (projectConfig?.hasCommands ?? false)}
-              sharedConfigError={
-                isGeneralSpaceSelected
-                  ? null
-                  : (projectConfig?.shared.configError ?? null)
-              }
-              sharedConfigExists={
-                isGeneralSpaceSelected
-                  ? true
-                  : (projectConfig?.shared.configExists ?? false)
-              }
-              activeTab={activeTab}
-              activeCommand={activeCommand}
-              onAddProject={() => void handleAddProject()}
-              onAddLocalCommand={() => openCreateCommandDialog("local")}
-              onCreateConfig={() => void handleCreateConfig()}
-              onCreateShellTab={() => void handleCreateShellTab()}
-            />
+          <main
+            className={[
+              "min-h-0 flex-1",
+              isProjectStateLoading
+                ? "pointer-events-none"
+                : "pointer-events-auto",
+            ].join(" ")}
+          >
+            {
+              <MainContent
+                project={displayedProject}
+                workspaceId={displayedProjectId}
+                workspaceName={
+                  isGeneralSpaceSelected ? GENERAL_SPACE_NAME : undefined
+                }
+                hasCommands={isGeneralSpaceSelected ? true : (projectConfig?.hasCommands ?? false)}
+                sharedConfigError={
+                  isGeneralSpaceSelected
+                    ? null
+                    : (projectConfig?.shared.configError ?? null)
+                }
+                sharedConfigExists={
+                  isGeneralSpaceSelected
+                    ? true
+                    : (projectConfig?.shared.configExists ?? false)
+                }
+                activeTab={activeTab}
+                activeCommand={activeCommand}
+                onAddProject={() => void handleAddProject()}
+                onAddLocalCommand={() => openCreateCommandDialog("local")}
+                onCreateConfig={() => void handleCreateConfig()}
+                onCreateShellTab={() => void handleCreateShellTab()}
+              />
+            }
           </main>
         </div>
 
@@ -1520,8 +1854,8 @@ export function App() {
               ? commandDialogState.preferredSource
               : getDefaultCreateCommandSource(projectConfig)
           }
-          projectId={selectedProject?.id ?? ""}
-          projectName={selectedProject?.name ?? GENERAL_SPACE_NAME}
+          projectId={displayedProject?.id ?? ""}
+          projectName={displayedProject?.name ?? GENERAL_SPACE_NAME}
           commands={commands}
           projectConfig={projectConfig}
           onCommandsChanged={handleCommandsChanged}

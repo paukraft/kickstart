@@ -53,6 +53,26 @@ const editorIcons: Record<EditorId, ComponentType<{ className?: string }>> = {
   zed: ZedIcon,
 };
 
+function EditorIcon({
+  className,
+  editor,
+}: {
+  className?: string;
+  editor: EditorOption | null;
+}) {
+  const FallbackIcon = editor ? editorIcons[editor.id] : RiFolderOpenLine;
+
+  if (editor?.iconDataUrl) {
+    const imageClassName = className
+      ? `${className} shrink-0 rounded-[4px] object-contain`
+      : "shrink-0 rounded-[4px] object-contain";
+
+    return <img alt="" aria-hidden className={imageClassName} src={editor.iconDataUrl} />;
+  }
+
+  return <FallbackIcon className={className} />;
+}
+
 interface OpenInEditorControlProps {
   beforeOpen?: () => Promise<void>;
   className?: string;
@@ -86,7 +106,6 @@ export function OpenInEditorControl({
   }, [availableEditors, preferredEditor]);
 
   const primaryEditor = availableEditors.find((editor) => editor.id === effectiveEditor) ?? null;
-  const PrimaryIcon = primaryEditor ? editorIcons[primaryEditor.id] : RiFolderOpenLine;
 
   function storePreferredEditor(editorId: EditorId) {
     window.localStorage.setItem(LAST_EDITOR_STORAGE_KEY, editorId);
@@ -127,7 +146,7 @@ export function OpenInEditorControl({
         variant={variant}
         onClick={() => void handleOpen(effectiveEditor)}
       >
-        <PrimaryIcon className="mr-1 size-3.5" />
+        <EditorIcon className="mr-1 size-3.5" editor={primaryEditor} />
         {primaryLabel ?? `Open in ${primaryEditor?.label ?? "Editor"}`}
       </Button>
       {availableEditors.length > 1 && (
@@ -141,13 +160,12 @@ export function OpenInEditorControl({
           />
           <DropdownMenuContent align="end">
             {availableEditors.map((editor) => {
-              const Icon = editorIcons[editor.id];
               return (
                 <DropdownMenuItem
                   key={editor.id}
                   onClick={() => void handleOpen(editor.id)}
                 >
-                  <Icon className="size-4" />
+                  <EditorIcon className="size-4" editor={editor} />
                   {editor.label}
                 </DropdownMenuItem>
               );

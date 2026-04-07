@@ -7,7 +7,9 @@ import { type ReactNode, useRef, useState } from "react"
 export interface SliderItem {
   title: string
   description: string
-  content?: ReactNode | ((active: boolean) => ReactNode)
+  content?:
+    | ReactNode
+    | ((state: { active: boolean; preload: boolean }) => ReactNode)
 }
 
 interface ContentSliderProps {
@@ -19,6 +21,11 @@ interface ContentSliderProps {
 
 const SLIDE_WIDTH = 65 // % of container
 const GAP = 1.5 // rem
+
+const getCircularDistance = (a: number, b: number, length: number) => {
+  const direct = Math.abs(a - b)
+  return Math.min(direct, length - direct)
+}
 
 const textVariants = {
   enter: (d: number) => ({ x: d > 0 ? 20 : -20, opacity: 0 }),
@@ -101,7 +108,10 @@ export const ContentSlider = ({ items, className, aspectRatio = "16/10", gap: ga
               onClick={() => !dragged.current && i !== index && go(i)}
             >
               {typeof slide.content === "function"
-                ? slide.content(i === index)
+                ? slide.content({
+                    active: i === index,
+                    preload: getCircularDistance(i, index, items.length) <= 1,
+                  })
                 : slide.content}
             </div>
           ))}

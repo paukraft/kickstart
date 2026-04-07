@@ -7,6 +7,12 @@ import {
   getBrokenSharedConfigBanner,
   mergeSelectedProjectRuntime,
   reorderCommandsWithinSection,
+  resolveRefreshedSelectedTabId,
+  resolveSelectedProjectId,
+  shouldBlockProjectScopedShortcut,
+  shouldClearPendingProjectSettingsId,
+  shouldOpenPendingProjectSettings,
+  shouldProcessVisibleProjectTerminalEvent,
 } from "./app";
 
 function createCommand(
@@ -36,6 +42,46 @@ function createTab(command: ResolvedCommandConfig, sortOrder: number): ProjectTa
     sortOrder,
     title: command.name,
     updatedAt: "2026-04-05T00:00:00.000Z",
+  };
+}
+
+function createShellTab(input: {
+  id: string;
+  projectId?: string;
+  sortOrder: number;
+  title?: string;
+}): ProjectTabRecord {
+  return {
+    commandId: null,
+    createdAt: "2026-04-05T00:00:00.000Z",
+    id: input.id,
+    kind: "shell",
+    projectId: input.projectId ?? "project-1",
+    shellCwd: null,
+    sortOrder: input.sortOrder,
+    title: input.title ?? input.id,
+    updatedAt: "2026-04-05T00:00:00.000Z",
+  };
+}
+
+function createProject(input: {
+  id: string;
+  name: string;
+  runtimeState: "not-running" | "running" | "starting" | "stopping" | "partially-running";
+  sortOrder: number;
+}) {
+  return {
+    groupId: null,
+    hasCommands: true,
+    iconUrl: null,
+    id: input.id,
+    name: input.name,
+    path: `/tmp/${input.id}`,
+    runningCommandCount: input.runtimeState === "running" ? 1 : 0,
+    sharedConfigExists: true,
+    startupCommandCount: 1,
+    runtimeState: input.runtimeState,
+    sortOrder: input.sortOrder,
   };
 }
 
@@ -162,6 +208,299 @@ describe("mergeSelectedProjectRuntime", () => {
         { isCurrentProjectConfig: false },
       ),
     ).toBe(project);
+  });
+});
+
+describe("resolveSelectedProjectId", () => {
+  const projects = [
+    {
+      groupId: null,
+      hasCommands: true,
+      iconUrl: null,
+      id: "project-1",
+      name: "Alpha",
+      path: "/tmp/alpha",
+      sharedConfigExists: true,
+      startupCommandCount: 1,
+      runningCommandCount: 0,
+      runtimeState: "not-running" as const,
+      sortOrder: 0,
+    },
+    {
+      groupId: null,
+      hasCommands: true,
+      iconUrl: null,
+      id: "project-2",
+      name: "Beta",
+      path: "/tmp/beta",
+      sharedConfigExists: true,
+      startupCommandCount: 1,
+      runningCommandCount: 0,
+      runtimeState: "not-running" as const,
+      sortOrder: 1,
+    },
+  ];
+
+  it("hydrates the persisted project selection on startup", () => {
+    expect(
+      resolveSelectedProjectId({
+        currentSelectedProjectId: null,
+        persistedSelectedProjectId: "project-2",
+        projects,
+      }),
+    ).toBe("project-2");
+  });
+
+  it("keeps the in-memory selection during refresh when it is still valid", () => {
+    expect(
+      resolveSelectedProjectId({
+        currentSelectedProjectId: "project-1",
+        keepSelection: true,
+        persistedSelectedProjectId: "project-2",
+        projects,
+      }),
+    ).toBe("project-1");
+  });
+
+  it("falls back to general when the persisted project no longer exists", () => {
+    expect(
+      resolveSelectedProjectId({
+        currentSelectedProjectId: null,
+        persistedSelectedProjectId: "missing-project",
+        projects,
+      }),
+    ).toBe("general");
+  });
+});
+
+describe("resolveRefreshedSelectedTabId", () => {
+  it("trusts the persisted active tab when switching projects", () => {
+    const currentSelectedTabId = createCommandTabId(createEffectiveCommandId("shared", "dev"));
+    const persistedActiveTabId = "shell:notes";
+    const nextTabs = [
+      createTab(createCommand({ source: "shared", sourceCommandId: "dev", type: "service" }), 0),
+      createShellTab({ id: persistedActiveTabId, projectId: "project-2", sortOrder: 1, title: "Notes" }),
+    ];
+
+    expect(
+      resolveRefreshedSelectedTabId({
+        currentSelectedTabId,
+        nextTabs,
+        persistedActiveTabId,
+        previousProjectId: "project-1",
+        projectId: "project-2",
+      }),
+    ).toBe(persistedActiveTabId);
+  });
+
+  it("preserves the current tab during a same-project refresh when it still exists", () => {
+    const currentSelectedTabId = "shell:notes";
+    const persistedActiveTabId = createCommandTabId(createEffectiveCommandId("shared", "dev"));
+    const nextTabs = [
+      createTab(createCommand({ source: "shared", sourceCommandId: "dev", type: "service" }), 0),
+      createShellTab({ id: currentSelectedTabId, sortOrder: 1, title: "Notes" }),
+    ];
+
+    expect(
+      resolveRefreshedSelectedTabId({
+        currentSelectedTabId,
+        nextTabs,
+        persistedActiveTabId,
+        previousProjectId: "project-1",
+        projectId: "project-1",
+      }),
+    ).toBe(currentSelectedTabId);
+  });
+
+  it("falls back to the first tab when neither preferred tab exists", () => {
+    const firstTabId = createCommandTabId(createEffectiveCommandId("shared", "dev"));
+    const nextTabs = [
+      createTab(createCommand({ source: "shared", sourceCommandId: "dev", type: "service" }), 0),
+      createShellTab({ id: "shell:notes", sortOrder: 1, title: "Notes" }),
+    ];
+
+    expect(
+      resolveRefreshedSelectedTabId({
+        currentSelectedTabId: "shell:missing",
+        nextTabs,
+        persistedActiveTabId: "shell:also-missing",
+        previousProjectId: "project-1",
+        projectId: "project-1",
+      }),
+    ).toBe(firstTabId);
+  });
+});
+
+describe("selected project runtime refresh", () => {
+  it("uses the latest project snapshot after a selection change", () => {
+    const staleProjects = [
+      createProject({
+        id: "project-1",
+        name: "Alpha",
+        runtimeState: "not-running",
+        sortOrder: 0,
+      }),
+      createProject({
+        id: "project-2",
+        name: "Beta",
+        runtimeState: "not-running",
+        sortOrder: 1,
+      }),
+    ];
+    const refreshedProjects = [
+      staleProjects[0],
+      createProject({
+        id: "project-2",
+        name: "Beta",
+        runtimeState: "running",
+        sortOrder: 1,
+      }),
+    ];
+
+    const staleSelection = mergeSelectedProjectRuntime(
+      staleProjects.find((project) => project.id === "project-2") ?? null,
+      {
+        hasCommands: true,
+        sharedConfigExists: true,
+        startupCommandCount: 1,
+      },
+      { isCurrentProjectConfig: true },
+    );
+    const refreshedSelection = mergeSelectedProjectRuntime(
+      refreshedProjects.find((project) => project.id === "project-2") ?? null,
+      {
+        hasCommands: true,
+        sharedConfigExists: true,
+        startupCommandCount: 1,
+      },
+      { isCurrentProjectConfig: true },
+    );
+
+    expect(staleSelection?.runtimeState).toBe("not-running");
+    expect(refreshedSelection?.runtimeState).toBe("running");
+  });
+});
+
+describe("shouldProcessVisibleProjectTerminalEvent", () => {
+  it("tracks terminal events for the visible hydrated project while selection is still catching up", () => {
+    expect(
+      shouldProcessVisibleProjectTerminalEvent({
+        displayedProjectId: "project-1",
+        event: {
+          projectId: "project-1",
+          type: "updated",
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores terminal events for the newly selected project until it becomes visible", () => {
+    expect(
+      shouldProcessVisibleProjectTerminalEvent({
+        displayedProjectId: "project-1",
+        event: {
+          projectId: "project-2",
+          type: "updated",
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores event types that do not affect runtime refresh", () => {
+    expect(
+      shouldProcessVisibleProjectTerminalEvent({
+        displayedProjectId: "project-1",
+        event: {
+          projectId: "project-1",
+          type: "output",
+        },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("shouldBlockProjectScopedShortcut", () => {
+  it("blocks project-scoped shortcuts while project state is hydrating", () => {
+    expect(
+      shouldBlockProjectScopedShortcut({
+        actionId: "new-shell-tab",
+        isProjectStateLoading: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldBlockProjectScopedShortcut({
+        actionId: "select-tab-1",
+        isProjectStateLoading: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldBlockProjectScopedShortcut({
+        actionId: "open-project-settings",
+        isProjectStateLoading: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("allows global shortcuts while project state is hydrating", () => {
+    expect(
+      shouldBlockProjectScopedShortcut({
+        actionId: "show-keyboard-shortcuts",
+        isProjectStateLoading: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldBlockProjectScopedShortcut({
+        actionId: "toggle-project-command-menu",
+        isProjectStateLoading: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("allows project-scoped shortcuts once hydration is complete", () => {
+    expect(
+      shouldBlockProjectScopedShortcut({
+        actionId: "close-tab",
+        isProjectStateLoading: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("pending project settings intent", () => {
+  it("clears the pending settings request after unrelated navigation", () => {
+    expect(
+      shouldClearPendingProjectSettingsId({
+        pendingProjectSettingsId: "project-2",
+        selectedProjectId: "project-3",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the pending settings request while the same project is still selected", () => {
+    expect(
+      shouldClearPendingProjectSettingsId({
+        pendingProjectSettingsId: "project-2",
+        selectedProjectId: "project-2",
+      }),
+    ).toBe(false);
+  });
+
+  it("opens when the requested project finishes hydrating", () => {
+    expect(
+      shouldOpenPendingProjectSettings({
+        hydratedProjectId: "project-2",
+        pendingProjectSettingsId: "project-2",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not open until the requested project hydrates", () => {
+    expect(
+      shouldOpenPendingProjectSettings({
+        hydratedProjectId: "project-1",
+        pendingProjectSettingsId: "project-2",
+      }),
+    ).toBe(false);
   });
 });
 

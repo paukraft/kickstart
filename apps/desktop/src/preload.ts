@@ -18,6 +18,7 @@ const desktopBridge: DesktopBridge = {
   deleteCommand: (input) => ipcRenderer.invoke("kickstart:delete-command", input),
   deleteProject: (projectId) => ipcRenderer.invoke("kickstart:delete-project", projectId),
   deleteShellTab: (projectId, tabId) => ipcRenderer.invoke("kickstart:delete-shell-tab", projectId, tabId),
+  getSelectedProjectId: () => ipcRenderer.invoke("kickstart:get-selected-project-id"),
   downloadUpdate: () => ipcRenderer.invoke("kickstart:update-download"),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   getProjectConfig: (projectId) => ipcRenderer.invoke("kickstart:get-project-config", projectId),

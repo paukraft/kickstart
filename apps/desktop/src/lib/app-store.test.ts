@@ -342,6 +342,27 @@ describe("AppStore.updateTabShellCwd", () => {
   });
 });
 
+describe("AppStore selected project state", () => {
+  it("persists the selected project across store reloads", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kickstart-app-store-selected-project-"));
+    cleanupPaths.add(dir);
+    const dbPath = path.join(dir, "app.db");
+
+    const firstStore = new AppStore(dbPath);
+    const project = firstStore.createProject("/tmp/alpha", "alpha");
+    firstStore.selectProject(project.id);
+    firstStore.close();
+
+    const secondStore = new AppStore(dbPath);
+
+    try {
+      expect(secondStore.getSelectedProjectId()).toBe(project.id);
+    } finally {
+      secondStore.close();
+    }
+  });
+});
+
 describe("AppStore.moveCommandTab", () => {
   it("renames a persisted command tab in place and preserves active selection", () => {
     const store = createStore();

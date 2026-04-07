@@ -22,28 +22,193 @@ import type {
   TerminalWriteInput,
 } from "./terminal";
 
+export interface EditorDefinition {
+  args?: readonly string[];
+  command: string | null;
+  darwinAppNames?: readonly string[];
+  darwinOpenWithArgs?: boolean;
+  darwinSystemAppPath?: string;
+  id: string;
+  label: string;
+  windowsExecutableCandidates?: readonly string[];
+  windowsSystemExecutable?: string;
+}
+
 export const EDITOR_OPTIONS = [
-  { command: "cursor", id: "cursor", label: "Cursor" },
+  {
+    command: "cursor",
+    darwinAppNames: ["Cursor"],
+    id: "cursor",
+    label: "Cursor",
+    windowsExecutableCandidates: ["Cursor/Cursor.exe", "Programs/Cursor/Cursor.exe"],
+  },
   { args: ["app"], command: "codex", id: "codex", label: "Codex" },
-  { command: "windsurf", id: "windsurf", label: "Windsurf" },
-  { command: "code", id: "vscode", label: "VS Code" },
-  { command: "zed", id: "zed", label: "Zed" },
-  { command: "idea", id: "intellij", label: "IntelliJ IDEA" },
-  { command: "webstorm", id: "webstorm", label: "WebStorm" },
-  { command: "pycharm", id: "pycharm", label: "PyCharm" },
-  { command: "goland", id: "goland", label: "GoLand" },
-  { command: "phpstorm", id: "phpstorm", label: "PhpStorm" },
-  { command: "rubymine", id: "rubymine", label: "RubyMine" },
-  { command: "clion", id: "clion", label: "CLion" },
-  { command: "rider", id: "rider", label: "Rider" },
-  { command: "studio", id: "android-studio", label: "Android Studio" },
-  { command: "subl", id: "sublime-text", label: "Sublime Text" },
-  { command: "nova", id: "nova", label: "Nova" },
-  { command: null, id: "file-manager", label: "File Manager" },
-] as const;
+  {
+    command: "windsurf",
+    darwinAppNames: ["Windsurf"],
+    id: "windsurf",
+    label: "Windsurf",
+    windowsExecutableCandidates: ["Windsurf/Windsurf.exe", "Programs/Windsurf/Windsurf.exe"],
+  },
+  {
+    command: "code",
+    darwinAppNames: ["Visual Studio Code"],
+    id: "vscode",
+    label: "VS Code",
+    windowsExecutableCandidates: ["Microsoft VS Code/Code.exe", "Programs/Microsoft VS Code/Code.exe"],
+  },
+  {
+    command: "zed",
+    darwinAppNames: ["Zed"],
+    id: "zed",
+    label: "Zed",
+    windowsExecutableCandidates: ["Zed/Zed.exe", "Programs/Zed/Zed.exe"],
+  },
+  {
+    command: "idea",
+    darwinAppNames: ["IntelliJ IDEA", "IntelliJ IDEA Ultimate", "IntelliJ IDEA CE"],
+    darwinOpenWithArgs: true,
+    id: "intellij",
+    label: "IntelliJ IDEA",
+    windowsExecutableCandidates: [
+      "JetBrains/IntelliJ IDEA/bin/idea64.exe",
+      "JetBrains/IntelliJ IDEA/bin/idea.exe",
+      "Programs/IntelliJ IDEA/bin/idea64.exe",
+      "Programs/IntelliJ IDEA/bin/idea.exe",
+    ],
+  },
+  {
+    command: "webstorm",
+    darwinAppNames: ["WebStorm"],
+    darwinOpenWithArgs: true,
+    id: "webstorm",
+    label: "WebStorm",
+    windowsExecutableCandidates: [
+      "JetBrains/WebStorm/bin/webstorm64.exe",
+      "JetBrains/WebStorm/bin/webstorm.exe",
+      "Programs/WebStorm/bin/webstorm64.exe",
+      "Programs/WebStorm/bin/webstorm.exe",
+    ],
+  },
+  {
+    command: "pycharm",
+    darwinAppNames: ["PyCharm", "PyCharm Professional", "PyCharm CE"],
+    darwinOpenWithArgs: true,
+    id: "pycharm",
+    label: "PyCharm",
+    windowsExecutableCandidates: [
+      "JetBrains/PyCharm/bin/pycharm64.exe",
+      "JetBrains/PyCharm/bin/pycharm.exe",
+      "Programs/PyCharm/bin/pycharm64.exe",
+      "Programs/PyCharm/bin/pycharm.exe",
+    ],
+  },
+  {
+    command: "goland",
+    darwinAppNames: ["GoLand"],
+    darwinOpenWithArgs: true,
+    id: "goland",
+    label: "GoLand",
+    windowsExecutableCandidates: [
+      "JetBrains/GoLand/bin/goland64.exe",
+      "JetBrains/GoLand/bin/goland.exe",
+      "Programs/GoLand/bin/goland64.exe",
+      "Programs/GoLand/bin/goland.exe",
+    ],
+  },
+  {
+    command: "phpstorm",
+    darwinAppNames: ["PhpStorm"],
+    darwinOpenWithArgs: true,
+    id: "phpstorm",
+    label: "PhpStorm",
+    windowsExecutableCandidates: [
+      "JetBrains/PhpStorm/bin/phpstorm64.exe",
+      "JetBrains/PhpStorm/bin/phpstorm.exe",
+      "Programs/PhpStorm/bin/phpstorm64.exe",
+      "Programs/PhpStorm/bin/phpstorm.exe",
+    ],
+  },
+  {
+    command: "rubymine",
+    darwinAppNames: ["RubyMine"],
+    darwinOpenWithArgs: true,
+    id: "rubymine",
+    label: "RubyMine",
+    windowsExecutableCandidates: [
+      "JetBrains/RubyMine/bin/rubymine64.exe",
+      "JetBrains/RubyMine/bin/rubymine.exe",
+      "Programs/RubyMine/bin/rubymine64.exe",
+      "Programs/RubyMine/bin/rubymine.exe",
+    ],
+  },
+  {
+    command: "clion",
+    darwinAppNames: ["CLion"],
+    darwinOpenWithArgs: true,
+    id: "clion",
+    label: "CLion",
+    windowsExecutableCandidates: [
+      "JetBrains/CLion/bin/clion64.exe",
+      "JetBrains/CLion/bin/clion.exe",
+      "Programs/CLion/bin/clion64.exe",
+      "Programs/CLion/bin/clion.exe",
+    ],
+  },
+  {
+    command: "rider",
+    darwinAppNames: ["Rider"],
+    darwinOpenWithArgs: true,
+    id: "rider",
+    label: "Rider",
+    windowsExecutableCandidates: [
+      "JetBrains/Rider/bin/rider64.exe",
+      "JetBrains/Rider/bin/rider.exe",
+      "Programs/Rider/bin/rider64.exe",
+      "Programs/Rider/bin/rider.exe",
+    ],
+  },
+  {
+    command: "studio",
+    darwinAppNames: ["Android Studio"],
+    darwinOpenWithArgs: true,
+    id: "android-studio",
+    label: "Android Studio",
+    windowsExecutableCandidates: [
+      "Android/Android Studio/bin/studio64.exe",
+      "Android/Android Studio/bin/studio.exe",
+      "Programs/Android Studio/bin/studio64.exe",
+      "Programs/Android Studio/bin/studio.exe",
+    ],
+  },
+  {
+    command: "subl",
+    darwinAppNames: ["Sublime Text"],
+    id: "sublime-text",
+    label: "Sublime Text",
+    windowsExecutableCandidates: ["Sublime Text/sublime_text.exe", "Programs/Sublime Text/sublime_text.exe"],
+  },
+  {
+    command: "nova",
+    darwinAppNames: ["Nova"],
+    id: "nova",
+    label: "Nova",
+  },
+  {
+    command: null,
+    darwinSystemAppPath: "/System/Library/CoreServices/Finder.app",
+    id: "file-manager",
+    label: "File Manager",
+    windowsSystemExecutable: "explorer.exe",
+  },
+] as const satisfies readonly EditorDefinition[];
 
 export type EditorId = (typeof EDITOR_OPTIONS)[number]["id"];
-export type EditorOption = Pick<(typeof EDITOR_OPTIONS)[number], "id" | "label">;
+export interface EditorOption {
+  iconDataUrl?: string;
+  id: EditorId;
+  label: string;
+}
 
 export interface DesktopBootstrap {
   platform: NodeJS.Platform;
@@ -201,6 +366,7 @@ export interface DesktopBridge {
   deleteCommand: (input: DeleteCommandInput) => Promise<ProjectConfigPayload>;
   deleteProject: (projectId: string) => Promise<void>;
   deleteShellTab: (projectId: string, tabId: string) => Promise<ProjectTabState>;
+  getSelectedProjectId: () => Promise<string | null>;
   getUpdateState: () => Promise<DesktopUpdateState>;
   getProjectConfig: (projectId: string) => Promise<ProjectConfigPayload>;
   getProjectTerminalSessions: (projectId: string) => Promise<TerminalSessionSnapshot[]>;

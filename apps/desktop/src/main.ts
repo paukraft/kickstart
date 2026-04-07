@@ -1,16 +1,10 @@
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 
-import {
-  app,
-  BrowserWindow,
-  dialog,
-  ipcMain,
-  Menu,
-  shell,
-  type MenuItemConstructorOptions,
-} from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import {
@@ -55,7 +49,11 @@ import {
 } from "@kickstart/core";
 
 import { AppStore } from "./lib/app-store";
-import { getEditorLaunchCommand, listAvailableEditors } from "./lib/editor-launcher";
+import {
+  getEditorLaunchCommand,
+  getEditorSystemIconPath,
+  listAvailableEditors,
+} from "./lib/editor-launcher";
 import { ensureProjectTab } from "./lib/project-tabs";
 import {
   decomposeResolvedCommands,
@@ -116,6 +114,8 @@ const SHORTCUT_ACTION_CHANNEL = "kickstart:shortcut-action";
 const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_UPDATE_REPOSITORY = "paukraft/kickstart";
+const execFileAsync = promisify(execFile);
+const editorIconDataUrlCache = new Map<string, Promise<string | null>>();
 
 function resolvePackagedUpdateMode(): "auto" | "manual" {
   if (!app.isPackaged) {
@@ -131,6 +131,85 @@ function resolvePackagedUpdateMode(): "auto" | "manual" {
     return packageJson.kickstart?.updateMode === "manual" ? "manual" : "auto";
   } catch {
     return "auto";
+  }
+}
+
+async function listAvailableEditorsWithIcons() {
+  const editors = listAvailableEditors();
+
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    return editors;
+  }
+
+  return Promise.all(
+    editors.map(async (editor) => {
+      const iconPath = getEditorSystemIconPath(editor.id);
+      if (!iconPath) {
+        return editor;
+      }
+
+      try {
+        const iconDataUrl =
+          process.platform === "darwin"
+            ? await getMacIconDataUrl(iconPath)
+            : (await app.getFileIcon(iconPath, { size: "normal" })).toDataURL();
+
+        if (!iconDataUrl) {
+          return editor;
+        }
+
+        return {
+          ...editor,
+          iconDataUrl,
+        };
+      } catch {
+        return editor;
+      }
+    }),
+  );
+}
+
+function getMacIconDataUrl(iconPath: string) {
+  const cached = editorIconDataUrlCache.get(iconPath);
+  if (cached) {
+    return cached;
+  }
+
+  const task = loadMacIconDataUrl(iconPath).then((result) => {
+    if (!result) {
+      editorIconDataUrlCache.delete(iconPath);
+    }
+    return result;
+  });
+  editorIconDataUrlCache.set(iconPath, task);
+  return task;
+}
+
+async function loadMacIconDataUrl(iconPath: string) {
+  const extension = path.extname(iconPath).toLowerCase();
+
+  if (extension === ".png") {
+    return `data:image/png;base64,${(await readFile(iconPath)).toString("base64")}`;
+  }
+
+  if (extension !== ".icns") {
+    return null;
+  }
+
+  const tempDir = await mkdtemp(path.join(app.getPath("temp"), "kickstart-editor-icon-"));
+  const outputPath = path.join(tempDir, "icon.png");
+
+  try {
+    await execFileAsync("sips", ["-s", "format", "png", iconPath, "--out", outputPath]);
+    if (!existsSync(outputPath)) {
+      return null;
+    }
+
+    return `data:image/png;base64,${(await readFile(outputPath)).toString("base64")}`;
+  } catch {
+    return null;
+  } finally {
+    await rm(tempDir, { force: true, recursive: true });
   }
 }
 
@@ -1154,7 +1233,8 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("kickstart:list-projects", async () => listProjectsWithRuntime());
-  ipcMain.handle("kickstart:list-available-editors", async () => listAvailableEditors());
+  ipcMain.handle("kickstart:list-available-editors", async () => listAvailableEditorsWithIcons());
+  ipcMain.handle("kickstart:get-selected-project-id", async () => getStore().getSelectedProjectId());
 
   ipcMain.handle("kickstart:select-folder", async () => {
     const result = await dialog.showOpenDialog({

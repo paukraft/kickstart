@@ -1,5 +1,6 @@
 import { AppleIcon, GitHubIcon } from "@/components/icons"
 import Image from "next/image"
+import { preload } from "react-dom"
 
 import { DownloadButton } from "@/components/download-dialog-button"
 import { HeroVideo } from "@/components/hero-video"
@@ -9,6 +10,13 @@ import { FAQ } from "./faq"
 import { Features } from "./features"
 
 export default function Page() {
+  preload("/start-project.jpg", { as: "image", fetchPriority: "high" })
+  preload("/start-project.mp4", {
+    as: "video",
+    type: "video/mp4",
+    fetchPriority: "high",
+  })
+
   return (
     <>
 
@@ -67,7 +75,7 @@ export default function Page() {
       {/* App preview */}
       <div className="mx-auto mt-4 w-full max-w-5xl px-6 md:mt-6">
         <div className="overflow-hidden rounded-2xl bg-muted md:rounded-3xl" style={{ aspectRatio: "16/10" }}>
-          <HeroVideo src="/start-project.mp4" />
+          <HeroVideo src="/start-project.mp4" poster="/start-project.jpg" />
         </div>
       </div>
 
