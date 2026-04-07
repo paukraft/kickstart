@@ -23,9 +23,11 @@ import {
   type DesktopUpdateState,
   type EffectiveCommandId,
   type MoveProjectToGroupInput,
+  type NewShellTabInput,
   type ProjectConfigPayload,
   type ProjectRecord,
   type ProjectWithRuntime,
+  type RenameShellTabInput,
   type ReorderCommandsInput,
   type ReorderProjectsInGroupInput,
   type ReorderProjectsInput,
@@ -1411,8 +1413,12 @@ function registerIpcHandlers() {
     return syncProjectTabsForProject(projectId);
   });
 
-  ipcMain.handle("kickstart:create-shell-tab", async (_event, input: { projectId: string }) => {
+  ipcMain.handle("kickstart:create-shell-tab", async (_event, input: NewShellTabInput) => {
     return getStore().createShellTab(input.projectId);
+  });
+
+  ipcMain.handle("kickstart:rename-shell-tab", async (_event, input: RenameShellTabInput) => {
+    return getStore().renameShellTab(input.projectId, input.tabId, input.title);
   });
 
   ipcMain.handle("kickstart:delete-shell-tab", async (_event, projectId: string, tabId: string) => {

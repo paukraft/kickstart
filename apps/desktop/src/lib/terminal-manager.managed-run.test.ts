@@ -777,4 +777,93 @@ describe("TerminalManager managed runs", () => {
       }),
     );
   });
+
+  it("only treats shell startup noise as idle for a short grace period", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const onDataHandlers: Array<(data: string) => void> = [];
+      const onEvent = vi.fn();
+
+      spawnMock.mockImplementation(() => ({
+        kill: vi.fn(),
+        onData: (handler: (data: string) => void) => {
+          onDataHandlers.push(handler);
+        },
+        onExit: vi.fn(),
+        pid: 123,
+        resize: vi.fn(),
+        write: vi.fn(),
+      }));
+
+      const manager = new TerminalManager({
+        historyDir: "/tmp/kickstart-terminal-manager-test",
+        loadCommand: async () => null,
+        loadProject: async () => ({
+          createdAt: "",
+          id: "project-1",
+          name: "Project",
+          path: "/tmp/project",
+          sortOrder: 0,
+          updatedAt: "",
+        }),
+        loadTab: async () => createTab(),
+        onEvent,
+        persistTabCwd: vi.fn(),
+      });
+
+      vi.spyOn(manager as any, "listProcessTable").mockResolvedValue([
+        {
+          comm: "/bin/zsh",
+          pid: 456,
+          ppid: 123,
+          stat: "S+",
+        },
+        {
+          comm: "/usr/bin/login",
+          pid: 457,
+          ppid: 123,
+          stat: "S+",
+        },
+        {
+          comm: "/opt/homebrew/bin/starship",
+          pid: 458,
+          ppid: 123,
+          stat: "S+",
+        },
+      ]);
+
+      await manager.open({
+        cols: 120,
+        projectId: "project-1",
+        rows: 36,
+        tabId: "tab-1",
+      });
+
+      for (const handler of onDataHandlers) {
+        handler("loading shell startup files...");
+      }
+
+      await vi.advanceTimersByTimeAsync(200);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
+        hasActiveProcess: false,
+        status: "idle",
+      });
+
+      await vi.advanceTimersByTimeAsync(400);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
+        activeProcessCount: 2,
+        hasActiveProcess: true,
+        status: "running",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -11,9 +11,10 @@ import {
   RiTerminalLine,
   RiUserLine,
 } from "@remixicon/react";
+import { PointerActivationConstraints, PointerSensor } from "@dnd-kit/dom";
 import { DragDropProvider } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
 import { AnimatedBars, RUNTIME_COLORS, RUNTIME_RGB } from "@/components/app/runtime-indicators";
@@ -32,6 +33,28 @@ import { OpenInEditorControl } from "@/components/app/open-in-editor-control";
 import { Button } from "@/components/ui/button";
 import { commandByTabId } from "@/lib/command-utils";
 import { cn } from "@/lib/utils";
+
+function triggerInlineControl(
+  event: React.MouseEvent<HTMLButtonElement>,
+  action: () => void,
+) {
+  event.stopPropagation();
+  action();
+}
+
+function handleRowActivationKey(
+  event: React.KeyboardEvent<HTMLDivElement>,
+  action: () => void,
+) {
+  if (event.target !== event.currentTarget) {
+    return;
+  }
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  event.preventDefault();
+  action();
+}
 
 function ActionItem({
   command,
@@ -73,12 +96,7 @@ function ActionItem({
       role="button"
       tabIndex={0}
       onClick={onSelect}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
+      onKeyDown={(event) => handleRowActivationKey(event, onSelect)}
       className={cn(
         "group relative flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors overflow-hidden cursor-pointer",
         active
@@ -163,7 +181,7 @@ function ActionItem({
           )}
         </div>
       </div>
-      <div className="desktop-no-drag flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+      <div className="desktop-no-drag flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
         {tab && (
           <>
             {isRunning ? (
@@ -171,11 +189,13 @@ function ActionItem({
                 <Button
                   disabled={isBusy}
                   size="icon-xs"
+                  type="button"
                   variant="ghost"
                   onClick={(e) => {
-                    e.stopPropagation();
-                    if (isBusy) return;
-                    onRestart();
+                    triggerInlineControl(e, () => {
+                      if (isBusy) return;
+                      onRestart();
+                    });
                   }}
                 >
                   <RiRefreshLine />
@@ -183,11 +203,13 @@ function ActionItem({
                 <Button
                   disabled={isBusy}
                   size="icon-xs"
+                  type="button"
                   variant="ghost"
                   onClick={(e) => {
-                    e.stopPropagation();
-                    if (isBusy) return;
-                    onStop();
+                    triggerInlineControl(e, () => {
+                      if (isBusy) return;
+                      onStop();
+                    });
                   }}
                 >
                   <RiStopLine />
@@ -197,11 +219,13 @@ function ActionItem({
               <Button
                 disabled={isBusy}
                 size="icon-xs"
+                type="button"
                 variant="ghost"
                 onClick={(e) => {
-                  e.stopPropagation();
-                  if (isBusy) return;
-                  onRun();
+                  triggerInlineControl(e, () => {
+                    if (isBusy) return;
+                    onRun();
+                  });
                 }}
               >
                 {isBusy ? (
@@ -215,10 +239,10 @@ function ActionItem({
         )}
         <Button
           size="icon-xs"
+          type="button"
           variant="ghost"
           onClick={(e) => {
-            e.stopPropagation();
-            onEdit();
+            triggerInlineControl(e, onEdit);
           }}
         >
           <RiSettings4Line />
@@ -235,6 +259,8 @@ const COMMAND_SOURCE_SECTIONS = [
 
 interface TabItemProps {
   active: boolean;
+  isEditing?: boolean;
+  editDraft?: string;
   isLoading?: boolean;
   isPersonal?: boolean;
   isRunning?: boolean;
@@ -243,6 +269,10 @@ interface TabItemProps {
   subtitle: string;
   actions: React.ReactNode;
   onClick: () => void;
+  onDoubleClick?: () => void;
+  onEditChange?: (value: string) => void;
+  onEditCommit?: () => void;
+  onEditCancel?: () => void;
   onMouseDown?: (event: React.MouseEvent<HTMLElement>) => void;
   itemRef?: (element: HTMLDivElement | null) => void;
   isDragging?: boolean;
@@ -250,6 +280,8 @@ interface TabItemProps {
 
 function TabItem({
   active,
+  isEditing = false,
+  editDraft,
   isLoading = false,
   isPersonal = false,
   isRunning = false,
@@ -258,25 +290,43 @@ function TabItem({
   subtitle,
   actions,
   onClick,
+  onDoubleClick,
+  onEditChange,
+  onEditCommit,
+  onEditCancel,
   onMouseDown,
   itemRef,
   isDragging = false,
 }: TabItemProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
   const Icon = isLoading
     ? RiLoader4Line
     : kind === "command"
       ? RiCodeLine
       : RiTerminalLine;
 
+  useEffect(() => {
+    if (isEditing) {
+      requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      });
+    }
+  }, [isEditing]);
+
   return (
     <div
       ref={itemRef}
-      onClick={onClick}
+      onClick={() => {
+        if (isEditing) return;
+        onClick();
+      }}
+      onDoubleClick={() => {
+        if (isEditing) return;
+        onDoubleClick?.();
+      }}
       onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onClick();
-        }
+        if (!isEditing) handleRowActivationKey(event, onClick);
       }}
       role="button"
       tabIndex={0}
@@ -380,19 +430,61 @@ function TabItem({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <p className="truncate text-sm font-medium leading-tight">{title}</p>
+            <div className="min-w-0 flex-1 text-sm font-medium leading-tight">
+              {isEditing ? (
+                <input
+                  ref={inputRef}
+                  className="w-full rounded bg-transparent outline-none ring-1 ring-border px-1 -mx-1"
+                  value={editDraft ?? ""}
+                  onChange={(e) => onEditChange?.(e.target.value)}
+                  onBlur={() => onEditCommit?.()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      onEditCommit?.();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      onEditCancel?.();
+                    }
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <span
+                  className="block w-fit truncate"
+                  onClick={
+                    active && onDoubleClick
+                      ? (e) => {
+                          e.stopPropagation();
+                          onDoubleClick();
+                        }
+                      : undefined
+                  }
+                >
+                  {title}
+                </span>
+              )}
+            </div>
             {isPersonal && (
               <span className="shrink-0 text-amber-500/60 dark:text-amber-400/50" title="Personal command (not shared with team)">
                 <RiUserLine className="size-3" />
               </span>
             )}
           </div>
-          <p className="truncate text-xs leading-tight text-muted-foreground">{subtitle}</p>
+          {!isEditing && (
+            <p className="truncate text-xs leading-tight text-muted-foreground">
+              {subtitle}
+            </p>
+          )}
         </div>
       </div>
-      <div className="desktop-no-drag hidden shrink-0 gap-0.5 group-hover:flex">
-        {actions}
-      </div>
+      {!isEditing && (
+        <div className="desktop-no-drag hidden shrink-0 gap-0.5 group-hover:flex group-focus-within:flex">
+          {actions}
+        </div>
+      )}
     </div>
   );
 }
@@ -433,6 +525,7 @@ export interface ProjectSidebarProps {
   onAddCommand: () => void;
   onCreateShellTab: () => void;
   onDeleteShellTab: (tabId: string) => void;
+  onRenameShellTab: (tabId: string, title: string) => void;
   onReorderCommands: (
     source: CommandSource,
     type: ResolvedCommandConfig["type"],
@@ -446,37 +539,64 @@ function SortableTabItem({
   activeTabId,
   commands,
   dragGroup,
+  onBeginShellRename,
+  onCancelShellRename,
+  onCommitShellRename,
   onDeleteShellTab,
   onEditCommand,
   onRunTab,
   onRestartTab,
   onSelectTab,
+  onShellRenameDraftChange,
   onStopTab,
+  renamingShellTabId,
+  shellRenameDraft,
   tab,
   terminalSessions,
 }: {
   activeTabId: string | null;
   commands: ResolvedCommandConfig[];
   dragGroup: string;
+  onBeginShellRename?: (tab: ProjectTabRecord) => void;
+  onCancelShellRename?: () => void;
+  onCommitShellRename?: (tab: ProjectTabRecord) => void;
   onDeleteShellTab: (tabId: string) => void;
   onEditCommand: (command: ResolvedCommandConfig) => void;
   onRunTab: (tab: ProjectTabRecord) => void;
   onRestartTab: (tab: ProjectTabRecord) => void;
   onSelectTab: (tabId: string) => void;
+  onShellRenameDraftChange?: (title: string) => void;
   onStopTab: (tab: ProjectTabRecord) => void;
+  renamingShellTabId?: string | null;
+  shellRenameDraft?: string;
   tab: ProjectTabRecord;
   terminalSessions: Record<string, TerminalSessionSnapshot>;
 }) {
+  const sensors = useMemo(
+    () =>
+      tab.kind === "shell"
+        ? [
+            PointerSensor.configure({
+              activationConstraints: [
+                new PointerActivationConstraints.Distance({ value: 5 }),
+              ],
+            }),
+          ]
+        : undefined,
+    [tab.kind],
+  );
   const { isDragging, ref } = useSortable({
     group: dragGroup,
     id: tab.id,
     index: tab.sortOrder,
+    sensors,
   });
 
   const command = tab.kind === "command" ? commandByTabId(commands, tab.id) : null;
   const session = terminalSessions[tab.id];
   const isLoading = session?.status === "starting" || session?.status === "stopping";
   const isRunning = Boolean(session?.hasActiveProcess);
+  const isEditing = tab.kind === "shell" && renamingShellTabId === tab.id;
   const subtitle = session?.lastCommand
     ? `Last: ${session.lastCommand}`
     : tab.kind === "command"
@@ -487,12 +607,24 @@ function SortableTabItem({
     <TabItem
       active={activeTabId === tab.id}
       isDragging={isDragging}
+      isEditing={isEditing}
+      editDraft={shellRenameDraft}
       isLoading={isLoading}
       isPersonal={command?.source === "local"}
       isRunning={isRunning}
       kind={tab.kind}
+      title={tab.title}
+      subtitle={subtitle}
       itemRef={ref as (element: HTMLDivElement | null) => void}
       onClick={() => onSelectTab(tab.id)}
+      onDoubleClick={
+        tab.kind === "shell" && !isLoading
+          ? () => onBeginShellRename?.(tab)
+          : undefined
+      }
+      onEditChange={onShellRenameDraftChange}
+      onEditCommit={() => onCommitShellRename?.(tab)}
+      onEditCancel={onCancelShellRename}
       onMouseDown={
         tab.kind === "shell"
           ? (event) => {
@@ -504,8 +636,6 @@ function SortableTabItem({
             }
           : undefined
       }
-      subtitle={subtitle}
-      title={tab.title}
       actions={
         tab.kind === "command" ? (
           <>
@@ -516,9 +646,11 @@ function SortableTabItem({
                   size="icon-xs"
                   type="button"
                   variant="ghost"
-                  onClick={() => {
-                    if (isLoading) return;
-                    onRestartTab(tab);
+                  onClick={(event) => {
+                    triggerInlineControl(event, () => {
+                      if (isLoading) return;
+                      onRestartTab(tab);
+                    });
                   }}
                 >
                   <RiRefreshLine />
@@ -528,9 +660,11 @@ function SortableTabItem({
                   size="icon-xs"
                   type="button"
                   variant="ghost"
-                  onClick={() => {
-                    if (isLoading) return;
-                    onStopTab(tab);
+                  onClick={(event) => {
+                    triggerInlineControl(event, () => {
+                      if (isLoading) return;
+                      onStopTab(tab);
+                    });
                   }}
                 >
                   <RiStopLine />
@@ -542,9 +676,11 @@ function SortableTabItem({
                 size="icon-xs"
                 type="button"
                 variant="ghost"
-                onClick={() => {
-                  if (isLoading) return;
-                  onRunTab(tab);
+                onClick={(event) => {
+                  triggerInlineControl(event, () => {
+                    if (isLoading) return;
+                    onRunTab(tab);
+                  });
                 }}
               >
                 {isLoading ? (
@@ -560,7 +696,9 @@ function SortableTabItem({
                 size="icon-xs"
                 type="button"
                 variant="ghost"
-                onClick={() => onEditCommand(command)}
+                onClick={(event) => {
+                  triggerInlineControl(event, () => onEditCommand(command));
+                }}
               >
                 <RiSettings4Line />
               </Button>
@@ -572,9 +710,11 @@ function SortableTabItem({
             size="icon-xs"
             type="button"
             variant="ghost"
-            onClick={() => {
-              if (isLoading) return;
-              onDeleteShellTab(tab.id);
+            onClick={(event) => {
+              triggerInlineControl(event, () => {
+                if (isLoading) return;
+                onDeleteShellTab(tab.id);
+              });
             }}
           >
             <RiDeleteBinLine />
@@ -601,12 +741,15 @@ export function ProjectSidebar({
   onAddCommand,
   onCreateShellTab,
   onDeleteShellTab,
+  onRenameShellTab,
   onReorderCommands,
   onReorderShellTabs,
 }: ProjectSidebarProps) {
   const [actionsOpenByProject, setActionsOpenByProject] = useState<
     Record<string, boolean>
   >({});
+  const [renamingShellTabId, setRenamingShellTabId] = useState<string | null>(null);
+  const [shellRenameDraft, setShellRenameDraft] = useState("");
   const actionsStateKey = project?.id ?? "general";
   const actionsOpen = actionsOpenByProject[actionsStateKey] ?? false;
   const actionCommands = commands.filter(isActionCommand);
@@ -640,6 +783,26 @@ export function ProjectSidebar({
     ? commandByTabId(commands, activeActionTab.id)
     : null;
   const hasActions = actionCommands.length > 0;
+
+  function beginShellRename(tab: ProjectTabRecord) {
+    setRenamingShellTabId(tab.id);
+    setShellRenameDraft(tab.title);
+  }
+
+  function cancelShellRename() {
+    setRenamingShellTabId(null);
+    setShellRenameDraft("");
+  }
+
+  function commitShellRename(tab: ProjectTabRecord) {
+    const nextTitle = shellRenameDraft.trim();
+    if (!nextTitle || nextTitle === tab.title) {
+      cancelShellRename();
+      return;
+    }
+    onRenameShellTab(tab.id, nextTitle);
+    cancelShellRename();
+  }
 
   function createDragEndHandler(onReorder: (sourceId: string, targetId: string) => void) {
     return (
@@ -829,12 +992,18 @@ export function ProjectSidebar({
                     activeTabId={activeTabId}
                     commands={commands}
                     dragGroup="shell"
+                    onBeginShellRename={beginShellRename}
+                    onCancelShellRename={cancelShellRename}
+                    onCommitShellRename={commitShellRename}
                     onDeleteShellTab={onDeleteShellTab}
                     onEditCommand={onEditCommand}
+                    onShellRenameDraftChange={setShellRenameDraft}
                     onRunTab={onRunTab}
                     onRestartTab={onRestartTab}
+                    renamingShellTabId={renamingShellTabId}
                     onSelectTab={onSelectTab}
                     onStopTab={onStopTab}
+                    shellRenameDraft={shellRenameDraft}
                     tab={{ ...tab, sortOrder: index }}
                     terminalSessions={terminalSessions}
                   />

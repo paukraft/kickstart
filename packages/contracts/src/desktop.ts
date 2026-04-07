@@ -303,6 +303,12 @@ export interface NewShellTabInput {
   projectId: string;
 }
 
+export interface RenameShellTabInput {
+  projectId: string;
+  tabId: string;
+  title: string;
+}
+
 export interface SelectProjectInput {
   projectId: string;
 }
@@ -384,6 +390,7 @@ export interface DesktopBridge {
   onUpdateState: (
     listener: (state: DesktopUpdateState) => void,
   ) => () => void;
+  renameShellTab: (input: RenameShellTabInput) => Promise<ProjectTabState>;
   removeProjectFromGroup: (projectId: string) => Promise<void>;
   reorderCommands: (input: ReorderCommandsInput) => Promise<ProjectConfigPayload>;
   reorderProjects: (input: ReorderProjectsInput) => Promise<ProjectWithRuntime[]>;

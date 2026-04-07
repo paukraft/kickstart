@@ -590,6 +590,39 @@ export class AppStore {
       .run(shellCwd, timestamp, projectId, tabId);
   }
 
+  renameShellTab(projectId: string, tabId: string, title: string): ProjectTabState {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      throw new Error("Shell tab title cannot be empty.");
+    }
+
+    const tab = this.getTab(projectId, tabId);
+    if (!tab || tab.kind !== "shell") {
+      throw new Error("Shell tab not found.");
+    }
+
+    const timestamp = now();
+    if (isGeneralSpace(projectId)) {
+      this.db
+        .prepare(
+          `UPDATE general_space_tabs
+           SET title = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(nextTitle, timestamp, tabId);
+      return this.getTabState(projectId);
+    }
+
+    this.db
+      .prepare(
+        `UPDATE project_tabs
+         SET title = ?, updated_at = ?
+         WHERE project_id = ? AND id = ? AND kind = 'shell'`,
+      )
+      .run(nextTitle, timestamp, projectId, tabId);
+    return this.getTabState(projectId);
+  }
+
   moveCommandTab(
     projectId: string,
     previousTabId: string,

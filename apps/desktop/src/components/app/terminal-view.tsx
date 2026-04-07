@@ -7,6 +7,8 @@ import type {
   TerminalEvent,
 } from "@kickstart/contracts";
 
+import { createTerminalReplayGuard } from "@/lib/terminal-replay-guard";
+
 const darkTheme: ITheme = {
   background: "#09090b",
   foreground: "#e4e4e7",
@@ -149,6 +151,7 @@ export function TerminalView({
     terminal.loadAddon(fitAddon);
     terminal.open(host);
     fitAddon.fit();
+    const replayGuard = createTerminalReplayGuard();
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
@@ -158,12 +161,14 @@ export function TerminalView({
       if (renderedHistoryRef.current === history) {
         return;
       }
-      terminal.write("\u001bc");
-      if (history) terminal.write(history);
+      replayGuard.replay(terminal, `\u001bc${history}`);
       renderedHistoryRef.current = history;
     }
 
     const writeDisposable = terminal.onData((data) => {
+      if (replayGuard.isReplaying()) {
+        return;
+      }
       setExitHint(null);
       void window.desktop.terminalWrite({ data, projectId, tabId: tab.id });
     });

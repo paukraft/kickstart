@@ -415,6 +415,44 @@ describe("AppStore.moveCommandTab", () => {
   });
 });
 
+describe("AppStore.renameShellTab", () => {
+  it("renames a persisted shell tab in place", () => {
+    const store = createStore();
+
+    try {
+      const project = store.createProject("/tmp/alpha", "alpha");
+      const state = store.createShellTab(project.id);
+      const tabId = state.activeTabId!;
+
+      const nextState = store.renameShellTab(project.id, tabId, "API Logs");
+
+      expect(store.getTab(project.id, tabId)).toMatchObject({
+        id: tabId,
+        kind: "shell",
+        title: "API Logs",
+      });
+      expect(nextState.activeTabId).toBe(tabId);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects empty shell titles", () => {
+    const store = createStore();
+
+    try {
+      const project = store.createProject("/tmp/alpha", "alpha");
+      const state = store.createShellTab(project.id);
+
+      expect(() =>
+        store.renameShellTab(project.id, state.activeTabId!, "   "),
+      ).toThrow("cannot be empty");
+    } finally {
+      store.close();
+    }
+  });
+});
+
 describe("AppStore project command state", () => {
   it("persists local config by project path", () => {
     const store = createStore();

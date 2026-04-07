@@ -1130,6 +1130,19 @@ export function App() {
     await refreshTerminalSessions(selectedProjectId);
   }
 
+  async function handleRenameShellTab(tabId: string, title: string) {
+    if (!selectedProjectId) return;
+    const nextState = await window.desktop.renameShellTab({
+      projectId: selectedProjectId,
+      tabId,
+      title,
+    });
+    setTabs(nextState.tabs);
+    setSelectedTabId((current) =>
+      resolveSelectedTabId(nextState.tabs, current ?? nextState.activeTabId),
+    );
+  }
+
   function requestDeleteShellTab(tabId: string) {
     const session = terminalSessions[tabId];
     if (session?.status === "stopping") {
@@ -1760,6 +1773,7 @@ export function App() {
                 onAddCommand={() => openCreateCommandDialog()}
                 onCreateShellTab={() => void handleCreateShellTab()}
                 onDeleteShellTab={requestDeleteShellTab}
+                onRenameShellTab={(tabId, title) => void handleRenameShellTab(tabId, title)}
                 onReorderCommands={(source, type, sourceId, targetId) =>
                   void handleReorderCommands(source, type, sourceId, targetId)
                 }
@@ -1784,6 +1798,7 @@ export function App() {
                 onAddCommand={() => undefined}
                 onCreateShellTab={() => void handleCreateShellTab()}
                 onDeleteShellTab={requestDeleteShellTab}
+                onRenameShellTab={(tabId, title) => void handleRenameShellTab(tabId, title)}
                 onReorderCommands={() => undefined}
                 onReorderShellTabs={(sourceId, targetId) =>
                   void handleReorderShellTabs(sourceId, targetId)

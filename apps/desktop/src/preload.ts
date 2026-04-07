@@ -34,6 +34,7 @@ const desktopBridge: DesktopBridge = {
   openTerminal: (input) => ipcRenderer.invoke("kickstart:terminal-open", input),
   openInEditor: (path, editorId) => ipcRenderer.invoke("kickstart:open-in-editor", { editorId, path }),
   openExternalUrl: (url) => ipcRenderer.invoke("kickstart:open-external-url", url),
+  renameShellTab: (input) => ipcRenderer.invoke("kickstart:rename-shell-tab", input),
   removeProjectFromGroup: (projectId) => ipcRenderer.invoke("kickstart:remove-project-from-group", projectId),
   reorderCommands: (input) => ipcRenderer.invoke("kickstart:reorder-commands", input),
   reorderProjects: (input) => ipcRenderer.invoke("kickstart:reorder-projects", input),

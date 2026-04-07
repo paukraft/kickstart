@@ -32,6 +32,7 @@ interface TerminalSessionState {
   inputBuffer: string;
   kind: ProjectTabRecord["kind"];
   lastCommand: string | null;
+  lastOutputAt: number | null;
   lastPublishedStateKey: string | null;
   managedRunActive: boolean;
   oscBuffer: string;
@@ -85,6 +86,7 @@ const PROMPT_MARKER_START = "]697;StartPrompt";
 const PROMPT_MARKER_END = "]697;EndPrompt";
 const STARTUP_IDLE_TIMEOUT_MS = 8_000;
 const STARTUP_IDLE_POLL_INTERVAL_MS = 150;
+const UNSETTLED_SHELL_ACTIVITY_GRACE_MS = 500;
 const PROMPT_TIMEOUT_MS = 8_000;
 const STOP_INTERRUPT_TIMEOUT_MS = 1_500;
 const STOP_BURST_INTERRUPT_TIMEOUT_MS = 1_500;
@@ -177,6 +179,22 @@ function trailingPrefixLength(value: string, prefix: string) {
   return 0;
 }
 
+function sanitizeHistoryFileComponent(value: string) {
+  return value.replaceAll(/[^a-z0-9-]/gi, "_");
+}
+
+function shouldIgnoreUnsettledShellActivity(session: TerminalSessionState) {
+  return (
+    !session.promptReady &&
+    !session.managedRunActive &&
+    !session.startRequested &&
+    !session.stopRequested &&
+    session.lastCommand === null &&
+    session.lastOutputAt !== null &&
+    Date.now() - session.lastOutputAt < UNSETTLED_SHELL_ACTIVITY_GRACE_MS
+  );
+}
+
 export function resolveShellTabCwd(projectPath: string, shellCwd: string | null) {
   if (!shellCwd) {
     return projectPath;
@@ -210,11 +228,21 @@ export class TerminalManager {
     return `${projectId}:${tabId}`;
   }
 
+  private historyFileStem(projectId: string, tabId: string) {
+    return `${sanitizeHistoryFileComponent(projectId)}_${sanitizeHistoryFileComponent(tabId)}`;
+  }
+
   private historyPath(projectId: string, tabId: string) {
     return path.join(
       this.historyDir,
-      `${projectId.replaceAll(/[^a-z0-9-]/gi, "_")}_${tabId.replaceAll(/[^a-z0-9:-]/gi, "_")}.log`,
+      `${this.historyFileStem(projectId, tabId)}.log`,
     );
+  }
+
+  private shellHistoryPath(projectId: string, tabId: string) {
+    const shellHistoryDir = path.join(this.historyDir, "..", "shell-history");
+    fs.mkdirSync(shellHistoryDir, { recursive: true });
+    return path.join(shellHistoryDir, `${this.historyFileStem(projectId, tabId)}.history`);
   }
 
   private async listProcessTable(): Promise<ProcessRow[]> {
@@ -422,7 +450,7 @@ export class TerminalManager {
   ): Promise<TerminalSessionSnapshot> {
     const activeProcessCount = session.shellIntegrationActive
       ? (session.shellIntegrationCommandRunning ? 1 : 0)
-      : session.startupBypassActive
+      : session.startupBypassActive || shouldIgnoreUnsettledShellActivity(session)
         ? 0
       : this.countDescendantProcesses(
           session.process?.pid ?? null,
@@ -787,6 +815,7 @@ add-zsh-hook preexec _kickstart_preexec
   }
 
   private prepareShellLaunch(
+    session: Pick<TerminalSessionState, "projectId" | "tabId">,
     shell: ReturnType<typeof resolveDefaultShell>,
     launchOptions?: ShellLaunchOptions,
   ) {
@@ -798,15 +827,33 @@ add-zsh-hook preexec _kickstart_preexec
       TERM_PROGRAM: "kickstart",
     };
 
-    const shellName = path.basename(shell.command);
-    if (process.platform !== "win32" && shellName === "zsh") {
-      env.ZDOTDIR = this.ensureZshIntegrationDir();
-    }
+    this.applyShellIntegrationEnv(env, shell.command, session);
 
     return {
       args: shell.args,
       env,
     };
+  }
+
+  private applyShellIntegrationEnv(
+    env: Record<string, string | undefined>,
+    shellCommand: string,
+    session: Pick<TerminalSessionState, "projectId" | "tabId">,
+  ) {
+    const shellName = path.basename(shellCommand);
+
+    if (process.platform !== "win32" && shellName === "zsh") {
+      env.ZDOTDIR = this.ensureZshIntegrationDir();
+    }
+
+    switch (shellName) {
+      case "bash":
+      case "zsh":
+        env.HISTFILE = this.shellHistoryPath(session.projectId, session.tabId);
+        return;
+      default:
+        return;
+    }
   }
 
   private async resolveTabRuntime(projectId: string, tabId: string) {
@@ -849,6 +896,7 @@ add-zsh-hook preexec _kickstart_preexec
     session.oscBuffer = "";
     session.shellIntegrationActive = false;
     session.shellIntegrationCommandRunning = false;
+    session.lastOutputAt = null;
     session.startupBypassActive = true;
     this.armPromptWait(session);
     void startupGate.waitUntilReady().then(() => {
@@ -864,7 +912,7 @@ add-zsh-hook preexec _kickstart_preexec
     });
 
     const shell = resolveDefaultShell(process.platform, process.env);
-    const { args, env } = this.prepareShellLaunch(shell, launchOptions);
+    const { args, env } = this.prepareShellLaunch(session, shell, launchOptions);
     const pty = nodePty.spawn(shell.command, args, {
       cols: session.cols,
       cwd: session.cwd,
@@ -882,6 +930,7 @@ add-zsh-hook preexec _kickstart_preexec
       }
       session.startupGate?.signalActivity();
       session.history = `${session.history}${data}`;
+      session.lastOutputAt = Date.now();
       session.updatedAt = new Date().toISOString();
        this.parseOscSequences(session, data);
       this.detectPrompt(session, data);
@@ -905,6 +954,7 @@ add-zsh-hook preexec _kickstart_preexec
       session.oscBuffer = "";
       session.process = null;
       session.managedRunActive = false;
+      session.lastOutputAt = null;
       session.lastPublishedStateKey = null;
       session.promptReady = false;
       session.promptResolve = null;
@@ -963,6 +1013,7 @@ add-zsh-hook preexec _kickstart_preexec
         inputBuffer: "",
         kind: runtime.tab.kind,
         lastCommand: null,
+        lastOutputAt: null,
         lastPublishedStateKey: null,
         managedRunActive: false,
         oscBuffer: "",
@@ -1164,6 +1215,8 @@ add-zsh-hook preexec _kickstart_preexec
 
     const previousHistoryPath = this.historyPath(projectId, previousTabId);
     const nextHistoryPath = this.historyPath(projectId, nextTabId);
+    const previousShellHistoryPath = this.shellHistoryPath(projectId, previousTabId);
+    const nextShellHistoryPath = this.shellHistoryPath(projectId, nextTabId);
 
     try {
       if (fs.existsSync(previousHistoryPath)) {
@@ -1174,6 +1227,15 @@ add-zsh-hook preexec _kickstart_preexec
       }
     } catch {
       // Ignore history migration failures and keep the session usable.
+    }
+
+    try {
+      if (fs.existsSync(previousShellHistoryPath)) {
+        fs.rmSync(nextShellHistoryPath, { force: true });
+        fs.renameSync(previousShellHistoryPath, nextShellHistoryPath);
+      }
+    } catch {
+      // Ignore shell history migration failures and keep the session usable.
     }
   }
 
@@ -1253,6 +1315,7 @@ add-zsh-hook preexec _kickstart_preexec
     this.sessions.delete(key);
     if (input.deleteHistory) {
       fs.rmSync(this.historyPath(input.projectId, input.tabId), { force: true });
+      fs.rmSync(this.shellHistoryPath(input.projectId, input.tabId), { force: true });
     }
   }
 
