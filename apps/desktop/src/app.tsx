@@ -33,6 +33,7 @@ import { ProjectDropdown } from "@/components/app/project-dropdown";
 import { ProjectRail, type RailItem } from "@/components/app/project-rail";
 import { ProjectSidebar } from "@/components/app/project-sidebar";
 import { ShortcutsDialog } from "@/components/app/shortcuts-dialog";
+import { StartupSplash } from "@/components/app/startup-splash";
 import { TitleBar } from "@/components/app/title-bar";
 import {
   AlertDialog,
@@ -49,6 +50,7 @@ import { ButtonGroup } from "@/components/ui/button-group";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { commandByTabId, getPreferredCommandTabId } from "@/lib/command-utils";
+import { prefersReducedMotion } from "@/lib/media-preferences";
 import { reorderByIds, type RelativePosition } from "@/lib/reorder";
 import { getShortcutTabIndex } from "@/lib/shortcuts";
 import { installSoundAutoplayUnlock, playSound } from "@/lib/sounds";
@@ -407,6 +409,9 @@ interface LoadedProjectStateSnapshot {
 
 export function App() {
   // ── Core state ──────────────────────────────────────────────
+  const [showStartupSplash, setShowStartupSplash] = useState(
+    () => import.meta.env.MODE !== "test" && !prefersReducedMotion(),
+  );
   const [projects, setProjects] = useState<ProjectWithRuntime[]>([]);
   const [groups, setGroups] = useState<ProjectGroupRecord[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
@@ -810,6 +815,9 @@ export function App() {
       await playSound(command.soundId);
     },
   );
+  const dismissStartupSplash = useEffectEvent(() => {
+    setShowStartupSplash(false);
+  });
 
   // ── Effects ─────────────────────────────────────────────────
   useEffect(() => {
@@ -1540,6 +1548,11 @@ export function App() {
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col bg-background text-foreground">
+        <StartupSplash
+          visible={showStartupSplash}
+          onComplete={dismissStartupSplash}
+        />
+
         <TitleBar />
 
         {updateState &&

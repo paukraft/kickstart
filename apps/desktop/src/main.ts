@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import {
@@ -93,6 +93,10 @@ function debounce<T extends (...args: never[]) => void>(fn: T, delay: number): T
       fn(...args);
     }, delay);
   }) as T;
+}
+
+function getWindowBackgroundColor() {
+  return nativeTheme.shouldUseDarkColors ? "#09090b" : "#ffffff";
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -1185,7 +1189,7 @@ async function createProjectCommand(input: UpsertCommandInput) {
 
 function createWindow() {
   const window = new BrowserWindow({
-    backgroundColor: "#0a0d12",
+    backgroundColor: getWindowBackgroundColor(),
     height: 900,
     titleBarStyle: "hiddenInset",
     width: 1460,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
 
@@ -7,6 +7,7 @@ import type {
   TerminalEvent,
 } from "@kickstart/contracts";
 
+import { getPrefersDarkMode, useDarkMode } from "@/lib/media-preferences";
 import { createTerminalReplayGuard } from "@/lib/terminal-replay-guard";
 
 const darkTheme: ITheme = {
@@ -54,23 +55,6 @@ const lightTheme: ITheme = {
   brightCyan: "#06b6d4",
   brightWhite: "#fafafa",
 };
-
-const darkQuery = typeof window !== "undefined"
-  ? window.matchMedia("(prefers-color-scheme: dark)")
-  : null;
-
-function subscribeToDarkMode(callback: () => void) {
-  darkQuery?.addEventListener("change", callback);
-  return () => darkQuery?.removeEventListener("change", callback);
-}
-
-function getIsDark() {
-  return darkQuery?.matches ?? true;
-}
-
-function useDarkMode() {
-  return useSyncExternalStore(subscribeToDarkMode, getIsDark);
-}
 
 function systemMessage(text: string) {
   return `\r\n\x1b[38;5;246m${text}\x1b[0m\r\n`;
@@ -137,7 +121,7 @@ export function TerminalView({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const initialTheme = getIsDark() ? darkTheme : lightTheme;
+    const initialTheme = getPrefersDarkMode() ? darkTheme : lightTheme;
 
     const terminal = new Terminal({
       allowProposedApi: false,
