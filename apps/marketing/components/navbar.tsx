@@ -37,6 +37,7 @@ export function Navbar() {
         </Link>
         <div className="flex items-center gap-2">
           <Button
+            nativeButton={false}
             variant="ghost"
             size="icon-sm"
             render={

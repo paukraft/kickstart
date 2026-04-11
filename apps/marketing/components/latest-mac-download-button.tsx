@@ -98,6 +98,7 @@ export function LatestMacDownloadButton() {
 
   return (
     <Button
+      nativeButton={false}
       size="lg"
       render={
         <a

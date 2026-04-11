@@ -7,6 +7,7 @@ import {
   getBrokenSharedConfigBanner,
   mergeSelectedProjectRuntime,
   reorderCommandsWithinSection,
+  reorderRailItems,
   resolveRefreshedSelectedTabId,
   resolveSelectedProjectId,
   shouldBlockProjectScopedShortcut,
@@ -137,6 +138,46 @@ describe("reorderCommandsWithinSection", () => {
       createEffectiveCommandId("local", "test"),
       createEffectiveCommandId("local", "build"),
       createEffectiveCommandId("local", "preview"),
+    ]);
+  });
+});
+
+describe("reorderRailItems", () => {
+  it("moves a project before a target group in the shared rail ordering", () => {
+    const alpha = createProject({
+      id: "project-alpha",
+      name: "Alpha",
+      runtimeState: "not-running",
+      sortOrder: 0,
+    });
+    const beta = createProject({
+      id: "project-beta",
+      name: "Beta",
+      runtimeState: "not-running",
+      sortOrder: 0,
+    });
+    const gamma = createProject({
+      id: "project-gamma",
+      name: "Gamma",
+      runtimeState: "not-running",
+      sortOrder: 0,
+    });
+
+    expect(
+      reorderRailItems({
+        railItems: [
+          { type: "group", group: { id: "group-source", isCollapsed: false, sortOrder: 0, createdAt: "", updatedAt: "" }, projects: [alpha] },
+          { type: "project", project: beta },
+          { type: "group", group: { id: "group-target", isCollapsed: false, sortOrder: 1, createdAt: "", updatedAt: "" }, projects: [gamma] },
+        ],
+        sourceId: beta.id,
+        targetId: "group-target",
+        position: "before",
+      }),
+    ).toEqual([
+      { type: "group", id: "group-source" },
+      { type: "project", id: beta.id },
+      { type: "group", id: "group-target" },
     ]);
   });
 });

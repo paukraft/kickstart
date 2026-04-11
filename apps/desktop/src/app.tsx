@@ -108,6 +108,32 @@ function buildRailItems(
   return items;
 }
 
+function railItemId(item: RailItem) {
+  return item.type === "project" ? item.project.id : item.group.id;
+}
+
+export function reorderRailItems(args: {
+  railItems: RailItem[];
+  sourceId: string;
+  targetId: string;
+  position: RelativePosition;
+}) {
+  const reordered = reorderByIds(
+    args.railItems.map((item) => ({
+      id: railItemId(item),
+      item,
+    })),
+    args.sourceId,
+    args.targetId,
+    args.position,
+  );
+
+  return reordered.map((entry) => ({
+    type: entry.item.type,
+    id: entry.id,
+  }));
+}
+
 function shouldShowUpdateBanner(updateState: DesktopUpdateState) {
   return (
     updateState.status === "checking" ||
@@ -1387,6 +1413,43 @@ export function App() {
     await refreshProjects({ keepSelection: true });
   }
 
+  async function handleDropProjectOnRailPosition(
+    projectId: string,
+    targetItem: RailItem,
+    position: RelativePosition,
+  ) {
+    await window.desktop.removeProjectFromGroup(projectId);
+    const snapshot = await refreshProjects({ keepSelection: true });
+    const nextRailItems = buildRailItems(snapshot.projects, snapshot.groups);
+    await window.desktop.reorderRail({
+      items: reorderRailItems({
+        railItems: nextRailItems,
+        sourceId: projectId,
+        targetId: railItemId(targetItem),
+        position,
+      }),
+    });
+    await refreshProjects({ keepSelection: true });
+  }
+
+  async function handleDropProjectOnRailTail(projectId: string) {
+    await window.desktop.removeProjectFromGroup(projectId);
+    const snapshot = await refreshProjects({ keepSelection: true });
+    const nextRailItems = buildRailItems(snapshot.projects, snapshot.groups);
+    const lastItem = nextRailItems.at(-1);
+    if (!lastItem) return;
+    if (railItemId(lastItem) === projectId) return;
+    await window.desktop.reorderRail({
+      items: reorderRailItems({
+        railItems: nextRailItems,
+        sourceId: projectId,
+        targetId: railItemId(lastItem),
+        position: "after",
+      }),
+    });
+    await refreshProjects({ keepSelection: true });
+  }
+
   async function handleToggleGroupCollapsed(groupId: string) {
     await window.desktop.toggleGroupCollapsed(groupId);
     setGroups(await window.desktop.listGroups());
@@ -1397,24 +1460,13 @@ export function App() {
     targetItem: RailItem,
     position: RelativePosition,
   ) {
-    const reordered = reorderByIds(
-      railItems.map((item) => ({
-        id: item.type === "project" ? item.project.id : item.group.id,
-        item,
-      })),
-      sourceItem.type === "project"
-        ? sourceItem.project.id
-        : sourceItem.group.id,
-      targetItem.type === "project"
-        ? targetItem.project.id
-        : targetItem.group.id,
-      position,
-    );
     await window.desktop.reorderRail({
-      items: reordered.map((r) => ({
-        type: r.item.type,
-        id: r.id,
-      })),
+      items: reorderRailItems({
+        railItems,
+        sourceId: railItemId(sourceItem),
+        targetId: railItemId(targetItem),
+        position,
+      }),
     });
     await refreshProjects({ keepSelection: true });
   }
@@ -1665,6 +1717,16 @@ export function App() {
               void handleDropProjectOnGroup(p, g, t, pos)
             }
             onDropOnRail={(id) => void handleDropOnRail(id)}
+            onDropProjectOnRailPosition={(projectId, targetItem, position) =>
+              void handleDropProjectOnRailPosition(
+                projectId,
+                targetItem,
+                position,
+              )
+            }
+            onDropProjectOnRailTail={(projectId) =>
+              void handleDropProjectOnRailTail(projectId)
+            }
             onToggleGroupCollapsed={(id) => void handleToggleGroupCollapsed(id)}
             onReorderRail={(s, t, p) => void handleReorderRail(s, t, p)}
             onReorderInGroup={(g, s, t, p) =>

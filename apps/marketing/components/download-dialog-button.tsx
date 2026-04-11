@@ -18,6 +18,7 @@ export function DownloadButton({
   return (
     <Button
       className={className}
+      nativeButton={false}
       size={size}
       variant={variant}
       render={<a href="/install" />}

@@ -75,6 +75,12 @@ export interface ProjectRailProps {
     position?: "before" | "after",
   ) => void;
   onDropOnRail: (projectId: string) => void;
+  onDropProjectOnRailPosition: (
+    projectId: string,
+    targetItem: RailItem,
+    position: "before" | "after",
+  ) => void;
+  onDropProjectOnRailTail: (projectId: string) => void;
   onToggleGroupCollapsed: (groupId: string) => void;
   onReorderRail: (
     sourceItem: RailItem,
@@ -135,6 +141,9 @@ type PendingDrag = {
 const DRAG_START_DISTANCE = 4;
 const RAIL_EDGE_REORDER_THRESHOLD = 0.3;
 const RAIL_AUTO_SCROLL_EDGE = 36;
+const GROUP_RAIL_EDGE_REORDER_PX = 10;
+const GROUP_INSERT_TARGET_CLASSES = "bg-primary/[0.08] ring-1 ring-primary/25";
+const GROUP_ADD_TARGET_CLASSES = "bg-primary/[0.10] ring-2 ring-primary";
 
 function getReorderPosition(intent: DropIntent): "before" | "after" | null {
   if (intent?.action === "reorder-before") return "before";
@@ -180,6 +189,96 @@ function getNearestVerticalPosition(
   rect: DOMRect,
 ): "before" | "after" {
   return y < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+function getGroupInsertionIntent(args: {
+  clientY: number;
+  groupId: string;
+  projectNodes: HTMLElement[];
+  source: DragState;
+}): DropIntent {
+  const projects = args.projectNodes
+    .map((node) => {
+      const projectId = node.dataset.groupProjectId;
+      if (!projectId) return null;
+      return { projectId, rect: node.getBoundingClientRect() };
+    })
+    .filter(
+      (
+        project,
+      ): project is {
+        projectId: string;
+        rect: DOMRect;
+      } => Boolean(project),
+    );
+
+  if (projects.length === 0) return null;
+
+  const firstProject = projects[0];
+  if (firstProject && args.clientY <= firstProject.rect.top) {
+    if (
+      args.source.groupId === args.groupId &&
+      args.source.id === firstProject.projectId
+    ) {
+      return null;
+    }
+    return {
+      action: "reorder-before",
+      targetId: firstProject.projectId,
+      scope: "group",
+      groupId: args.groupId,
+    };
+  }
+
+  const lastProject = projects.at(-1);
+  if (lastProject && args.clientY >= lastProject.rect.bottom) {
+    if (
+      args.source.groupId === args.groupId &&
+      args.source.id === lastProject.projectId
+    ) {
+      return null;
+    }
+    return {
+      action: "reorder-after",
+      targetId: lastProject.projectId,
+      scope: "group",
+      groupId: args.groupId,
+    };
+  }
+
+  for (let index = 1; index < projects.length; index += 1) {
+    const previousProject = projects[index - 1];
+    const nextProject = projects[index];
+    if (!previousProject || !nextProject) continue;
+
+    if (
+      args.clientY >= previousProject.rect.bottom &&
+      args.clientY <= nextProject.rect.top
+    ) {
+      const midpoint =
+        previousProject.rect.bottom +
+        (nextProject.rect.top - previousProject.rect.bottom) / 2;
+      const position = args.clientY < midpoint ? "after" : "before";
+      const targetProjectId =
+        position === "after"
+          ? previousProject.projectId
+          : nextProject.projectId;
+      if (
+        args.source.groupId === args.groupId &&
+        args.source.id === targetProjectId
+      ) {
+        return null;
+      }
+      return {
+        action: position === "after" ? "reorder-after" : "reorder-before",
+        targetId: targetProjectId,
+        scope: "group",
+        groupId: args.groupId,
+      };
+    }
+  }
+
+  return null;
 }
 
 function distanceExceeded(
@@ -628,7 +727,7 @@ function CollapsedGroup({
 }) {
   const preview = projects.slice(0, 4);
   const isDragging = dragState?.type === "group" && dragState.id === groupId;
-  const isDropTarget =
+  const isAddToGroupTarget =
     dropIntent?.action === "add-to-group" && dropIntent.groupId === groupId;
   const isReorderBefore =
     dropIntent?.action === "reorder-before" &&
@@ -652,7 +751,7 @@ function CollapsedGroup({
         className={cn(
           "desktop-no-drag flex size-10 cursor-pointer items-center justify-center rounded-lg bg-muted/60 transition-all touch-none hover:bg-accent",
           isDragging && "cursor-grabbing",
-          isDropTarget && "scale-110 ring-2 ring-primary",
+          isAddToGroupTarget && GROUP_ADD_TARGET_CLASSES,
         )}
         onClick={onClick}
         onPointerDown={onPointerDown}
@@ -707,8 +806,13 @@ function ExpandedGroup({
   onDeleteProject: (projectId: string) => void;
 }) {
   const isDragging = dragState?.type === "group" && dragState.id === group.id;
-  const isDropTarget =
+  const isAddToGroupTarget =
     dropIntent?.action === "add-to-group" && dropIntent.groupId === group.id;
+  const isInsertIntoGroupTarget =
+    (dropIntent?.action === "reorder-before" ||
+      dropIntent?.action === "reorder-after") &&
+    dropIntent.scope === "group" &&
+    dropIntent.groupId === group.id;
   const isReorderBefore =
     dropIntent?.action === "reorder-before" &&
     dropIntent.scope === "rail" &&
@@ -731,7 +835,8 @@ function ExpandedGroup({
       <div
         className={cn(
           "relative flex flex-col items-center gap-1 rounded-2xl bg-muted/40 p-1 transition-all",
-          isDropTarget && "ring-2 ring-primary",
+          isInsertIntoGroupTarget && GROUP_INSERT_TARGET_CLASSES,
+          isAddToGroupTarget && GROUP_ADD_TARGET_CLASSES,
         )}
         data-group-shell={group.id}
       >
@@ -777,6 +882,8 @@ export function ProjectRail({
   onDropProjectOnProject,
   onDropProjectOnGroup,
   onDropOnRail,
+  onDropProjectOnRailPosition,
+  onDropProjectOnRailTail,
   onToggleGroupCollapsed,
   onReorderRail,
   onReorderInGroup,
@@ -877,49 +984,45 @@ export function ProjectRail({
 
         const rect = shell.getBoundingClientRect();
         if (!pointInRect(clientX, clientY, rect)) continue;
-
+        const zone = getRailItemZone(clientY, rect);
         const projectNodes = Array.from(
           shell.querySelectorAll<HTMLElement>("[data-group-project-id]"),
         );
 
         if (projectNodes.length > 0) {
-          const firstProject = projectNodes[0];
-          const lastProject = projectNodes.at(-1);
-          const firstProjectId = firstProject?.dataset.groupProjectId;
-          const lastProjectId = lastProject?.dataset.groupProjectId;
-          const firstRect = firstProject?.getBoundingClientRect();
-          const lastRect = lastProject?.getBoundingClientRect();
-
-          if (
-            firstProjectId &&
-            firstRect &&
-            clientY < firstRect.top &&
-            !(source.groupId === groupId && source.id === firstProjectId)
-          ) {
-            return {
-              action: "reorder-before",
-              targetId: firstProjectId,
-              scope: "group",
-              groupId,
-            };
+          if (source.groupId !== groupId) {
+            if (clientY <= rect.top + GROUP_RAIL_EDGE_REORDER_PX) {
+              return {
+                action: "reorder-before",
+                targetId: groupId,
+                scope: "rail",
+              };
+            }
+            if (clientY >= rect.bottom - GROUP_RAIL_EDGE_REORDER_PX) {
+              return {
+                action: "reorder-after",
+                targetId: groupId,
+                scope: "rail",
+              };
+            }
           }
 
-          if (
-            lastProjectId &&
-            lastRect &&
-            clientY > lastRect.bottom &&
-            !(source.groupId === groupId && source.id === lastProjectId)
-          ) {
-            return {
-              action: "reorder-after",
-              targetId: lastProjectId,
-              scope: "group",
-              groupId,
-            };
-          }
+          return getGroupInsertionIntent({
+            clientY,
+            groupId,
+            projectNodes,
+            source,
+          });
         }
 
         if (source.groupId !== groupId) {
+          if (zone === "top" || zone === "bottom") {
+            return {
+              action: zone === "top" ? "reorder-before" : "reorder-after",
+              targetId: groupId,
+              scope: "rail",
+            };
+          }
           return { action: "add-to-group", groupId };
         }
 
@@ -963,7 +1066,15 @@ export function ProjectRail({
       if (itemType === "group") {
         if (source.type === "project") {
           if (source.groupId === itemId) return null;
-          return { action: "add-to-group", groupId: itemId };
+          const zone = getRailItemZone(clientY, rect);
+          if (zone === "center") {
+            return { action: "add-to-group", groupId: itemId };
+          }
+          return {
+            action: zone === "top" ? "reorder-before" : "reorder-after",
+            targetId: itemId,
+            scope: "rail",
+          };
         }
 
         if (source.id === itemId) return null;
@@ -972,6 +1083,31 @@ export function ProjectRail({
             getNearestVerticalPosition(clientY, rect) === "before"
               ? "reorder-before"
               : "reorder-after",
+          targetId: itemId,
+          scope: "rail",
+        };
+      }
+    }
+
+    const firstNode = topLevelNodes[0];
+    if (firstNode) {
+      const itemType = firstNode.dataset.railItem;
+      const itemId = firstNode.dataset.itemId;
+      const rect = firstNode.getBoundingClientRect();
+
+      if (itemType && itemId && clientY < rect.top) {
+        if (itemType === "project") {
+          if (source.type === "project" && source.id === itemId) return null;
+          return {
+            action: "reorder-before",
+            targetId: itemId,
+            scope: "rail",
+          };
+        }
+
+        if (source.type === "group" && source.id === itemId) return null;
+        return {
+          action: "reorder-before",
           targetId: itemId,
           scope: "rail",
         };
@@ -1042,7 +1178,11 @@ export function ProjectRail({
           if (!targetItem) return;
 
           if (source.type === "project" && source.groupId) {
-            onDropOnRail(source.id);
+            onDropProjectOnRailPosition(
+              source.id,
+              targetItem,
+              reorderPosition,
+            );
             return;
           }
 
@@ -1063,7 +1203,7 @@ export function ProjectRail({
 
       if (intent.action === "rail-tail") {
         if (source.type === "project" && source.groupId) {
-          onDropOnRail(source.id);
+          onDropProjectOnRailTail(source.id);
           return;
         }
 
@@ -1181,7 +1321,7 @@ export function ProjectRail({
 
       <div
         ref={railScrollRef}
-        className="scrollbar-hidden relative flex min-h-0 flex-1 flex-col items-center gap-1.5 overflow-y-auto pl-2 -ml-2"
+        className="scrollbar-hidden relative -ml-2 flex min-h-0 flex-1 flex-col items-center gap-1.5 overflow-y-auto pl-2 pt-1"
       >
         {railItems.map((item) => {
           if (item.type === "project") {
