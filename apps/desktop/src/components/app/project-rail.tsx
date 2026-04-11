@@ -142,7 +142,6 @@ const DRAG_START_DISTANCE = 4;
 const RAIL_EDGE_REORDER_THRESHOLD = 0.3;
 const RAIL_AUTO_SCROLL_EDGE = 36;
 const GROUP_RAIL_EDGE_REORDER_PX = 10;
-const GROUP_INSERT_TARGET_CLASSES = "bg-primary/[0.08] ring-1 ring-primary/25";
 const GROUP_ADD_TARGET_CLASSES = "bg-primary/[0.10] ring-2 ring-primary";
 
 function getReorderPosition(intent: DropIntent): "before" | "after" | null {
@@ -835,8 +834,8 @@ function ExpandedGroup({
       <div
         className={cn(
           "relative flex flex-col items-center gap-1 rounded-2xl bg-muted/40 p-1 transition-all",
-          isInsertIntoGroupTarget && GROUP_INSERT_TARGET_CLASSES,
-          isAddToGroupTarget && GROUP_ADD_TARGET_CLASSES,
+          (isInsertIntoGroupTarget || isAddToGroupTarget) &&
+            GROUP_ADD_TARGET_CLASSES,
         )}
         data-group-shell={group.id}
       >
