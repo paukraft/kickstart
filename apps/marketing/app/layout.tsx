@@ -43,7 +43,7 @@ export default function RootLayout({
               <Image
                 src={wordmarkPng}
                 alt="Kickstart"
-                className="mx-auto w-64 md:w-96"
+                className="mx-auto w-64 invert dark:invert-0 md:w-96"
               />
               <p className="mt-4 text-sm text-muted-foreground">
                 <a

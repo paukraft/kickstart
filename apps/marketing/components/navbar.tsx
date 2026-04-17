@@ -32,7 +32,7 @@ export function Navbar() {
           <Image
             src={wordmarkPng}
             alt="Kickstart"
-            className="h-5 w-auto"
+            className="h-5 w-auto invert dark:invert-0"
           />
         </Link>
         <div className="flex items-center gap-2">
