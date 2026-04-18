@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { loadDesktopEnv } from "./load-desktop-env.mjs";
+
+loadDesktopEnv();
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -19,4 +22,3 @@ child.on("exit", (code, signal) => {
   }
   process.exit(code ?? 0);
 });
-

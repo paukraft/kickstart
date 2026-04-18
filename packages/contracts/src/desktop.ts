@@ -26,10 +26,14 @@ export interface EditorDefinition {
   args?: readonly string[];
   command: string | null;
   darwinAppNames?: readonly string[];
+  darwinBundleIdentifiers?: readonly string[];
+  darwinExecutableCandidates?: readonly string[];
+  darwinRequiresExecutableWhenCommandMissing?: boolean;
   darwinOpenWithArgs?: boolean;
   darwinSystemAppPath?: string;
   id: string;
   label: string;
+  windowsAppxPackagePrefixes?: readonly string[];
   windowsExecutableCandidates?: readonly string[];
   windowsSystemExecutable?: string;
 }
@@ -38,14 +42,25 @@ export const EDITOR_OPTIONS = [
   {
     command: "cursor",
     darwinAppNames: ["Cursor"],
+    darwinBundleIdentifiers: ["com.todesktop.230313mzl4w4u92"],
     id: "cursor",
     label: "Cursor",
     windowsExecutableCandidates: ["Cursor/Cursor.exe", "Programs/Cursor/Cursor.exe"],
   },
-  { args: ["app"], command: "codex", id: "codex", label: "Codex" },
+  {
+    args: ["app"],
+    command: "codex",
+    darwinAppNames: ["Codex"],
+    darwinBundleIdentifiers: ["com.openai.codex"],
+    darwinRequiresExecutableWhenCommandMissing: true,
+    id: "codex",
+    label: "Codex",
+    windowsAppxPackagePrefixes: ["OpenAI.Codex"],
+  },
   {
     command: "windsurf",
     darwinAppNames: ["Windsurf"],
+    darwinBundleIdentifiers: ["com.exafunction.windsurf"],
     id: "windsurf",
     label: "Windsurf",
     windowsExecutableCandidates: ["Windsurf/Windsurf.exe", "Programs/Windsurf/Windsurf.exe"],
@@ -53,6 +68,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "code",
     darwinAppNames: ["Visual Studio Code"],
+    darwinBundleIdentifiers: ["com.microsoft.VSCode"],
     id: "vscode",
     label: "VS Code",
     windowsExecutableCandidates: ["Microsoft VS Code/Code.exe", "Programs/Microsoft VS Code/Code.exe"],
@@ -60,6 +76,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "zed",
     darwinAppNames: ["Zed"],
+    darwinBundleIdentifiers: ["dev.zed.Zed"],
     id: "zed",
     label: "Zed",
     windowsExecutableCandidates: ["Zed/Zed.exe", "Programs/Zed/Zed.exe"],
@@ -67,6 +84,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "idea",
     darwinAppNames: ["IntelliJ IDEA", "IntelliJ IDEA Ultimate", "IntelliJ IDEA CE"],
+    darwinBundleIdentifiers: ["com.jetbrains.intellij", "com.jetbrains.intellij.ce"],
     darwinOpenWithArgs: true,
     id: "intellij",
     label: "IntelliJ IDEA",
@@ -80,6 +98,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "webstorm",
     darwinAppNames: ["WebStorm"],
+    darwinBundleIdentifiers: ["com.jetbrains.WebStorm"],
     darwinOpenWithArgs: true,
     id: "webstorm",
     label: "WebStorm",
@@ -93,6 +112,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "pycharm",
     darwinAppNames: ["PyCharm", "PyCharm Professional", "PyCharm CE"],
+    darwinBundleIdentifiers: ["com.jetbrains.pycharm", "com.jetbrains.pycharm.ce"],
     darwinOpenWithArgs: true,
     id: "pycharm",
     label: "PyCharm",
@@ -106,6 +126,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "goland",
     darwinAppNames: ["GoLand"],
+    darwinBundleIdentifiers: ["com.jetbrains.goland"],
     darwinOpenWithArgs: true,
     id: "goland",
     label: "GoLand",
@@ -119,6 +140,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "phpstorm",
     darwinAppNames: ["PhpStorm"],
+    darwinBundleIdentifiers: ["com.jetbrains.phpstorm"],
     darwinOpenWithArgs: true,
     id: "phpstorm",
     label: "PhpStorm",
@@ -132,6 +154,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "rubymine",
     darwinAppNames: ["RubyMine"],
+    darwinBundleIdentifiers: ["com.jetbrains.rubymine"],
     darwinOpenWithArgs: true,
     id: "rubymine",
     label: "RubyMine",
@@ -145,6 +168,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "clion",
     darwinAppNames: ["CLion"],
+    darwinBundleIdentifiers: ["com.jetbrains.CLion"],
     darwinOpenWithArgs: true,
     id: "clion",
     label: "CLion",
@@ -158,6 +182,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "rider",
     darwinAppNames: ["Rider"],
+    darwinBundleIdentifiers: ["com.jetbrains.rider"],
     darwinOpenWithArgs: true,
     id: "rider",
     label: "Rider",
@@ -171,6 +196,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "studio",
     darwinAppNames: ["Android Studio"],
+    darwinBundleIdentifiers: ["com.google.android.studio"],
     darwinOpenWithArgs: true,
     id: "android-studio",
     label: "Android Studio",
@@ -184,6 +210,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "subl",
     darwinAppNames: ["Sublime Text"],
+    darwinBundleIdentifiers: ["com.sublimetext.4"],
     id: "sublime-text",
     label: "Sublime Text",
     windowsExecutableCandidates: ["Sublime Text/sublime_text.exe", "Programs/Sublime Text/sublime_text.exe"],
@@ -191,6 +218,7 @@ export const EDITOR_OPTIONS = [
   {
     command: "nova",
     darwinAppNames: ["Nova"],
+    darwinBundleIdentifiers: ["com.panic.Nova"],
     id: "nova",
     label: "Nova",
   },

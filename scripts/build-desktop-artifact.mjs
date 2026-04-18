@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadDesktopEnv } from "../apps/desktop/scripts/load-desktop-env.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -20,6 +21,8 @@ const desktopDir = join(repoRoot, "apps", "desktop");
 const desktopPackageJson = JSON.parse(
   readFileSync(join(desktopDir, "package.json"), "utf8"),
 );
+
+loadDesktopEnv();
 
 const HOST_PLATFORM = process.platform;
 const DEFAULT_PLATFORM = HOST_PLATFORM;
@@ -197,6 +200,7 @@ function createBuildConfig(options) {
     config.mac = {
       category: "public.app-category.developer-tools",
       icon: "icon.icns",
+      identity: options.signed ? undefined : null,
       target: options.target === "dmg" ? ["dmg", "zip"] : [options.target],
     };
   }
@@ -245,6 +249,12 @@ function stageDesktopApp(stageDir, options) {
     productName: desktopPackageJson.productName ?? "Kickstart",
     author: "paukraft",
     kickstart: {
+      telemetry: {
+        enabled: process.env.KICKSTART_TELEMETRY_ENABLED?.trim().toLowerCase() !== "0" &&
+          process.env.KICKSTART_TELEMETRY_ENABLED?.trim().toLowerCase() !== "false",
+        posthogHost: process.env.KICKSTART_POSTHOG_HOST?.trim() || "https://eu.i.posthog.com",
+        posthogKey: process.env.KICKSTART_POSTHOG_KEY?.trim() || null,
+      },
       updateMode: options.signed ? "auto" : "manual",
     },
     build: createBuildConfig(options),
@@ -300,10 +310,21 @@ function main() {
 
   try {
     const stageAppDir = stageDesktopApp(stageDir, options);
+    const stageTempDir = join(stageDir, "tmp");
+    const stageBunCacheDir = join(stageDir, "bun-cache");
 
-    run("bun", ["install", "--production"], { cwd: stageAppDir });
+    mkdirSync(stageTempDir, { recursive: true });
+    mkdirSync(stageBunCacheDir, { recursive: true });
 
-    const buildEnv = { ...process.env };
+    const stageCommandEnv = {
+      ...process.env,
+      BUN_INSTALL_CACHE_DIR: stageBunCacheDir,
+      TMPDIR: stageTempDir,
+    };
+
+    run("bun", ["install", "--production"], { cwd: stageAppDir, env: stageCommandEnv });
+
+    const buildEnv = { ...stageCommandEnv };
     for (const [key, value] of Object.entries(buildEnv)) {
       if (value === "") {
         delete buildEnv[key];

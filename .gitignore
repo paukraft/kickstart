@@ -24,3 +24,12 @@ Desktop.ini
 *.swp
 *.swo
 *~
+.vercel
+
+# Desktop duplicate JS mirrors alongside TS/TSX sources and configs
+apps/desktop/src/**/*.js
+apps/desktop/forge.config.js
+apps/desktop/vite.main.config.js
+apps/desktop/vite.preload.config.js
+apps/desktop/vite.renderer.config.js
+apps/desktop/vite.shared.js

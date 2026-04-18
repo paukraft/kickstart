@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { loadDesktopEnv } from "./load-desktop-env.mjs";
+
+loadDesktopEnv();
 
 const rendererPort = Number(process.env.ELECTRON_RENDERER_PORT ?? 5173);
 const rendererUrl = `http://127.0.0.1:${rendererPort}`;

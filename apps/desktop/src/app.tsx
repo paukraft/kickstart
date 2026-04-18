@@ -1746,27 +1746,32 @@ export function App() {
                 : "pointer-events-auto",
             ].join(" ")}
           >
-            <div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 bg-background">
-              {displayedProject ? (
-                <ProjectDropdown
-                  mode="dropdown-menu"
-                  project={displayedProject}
-                  triggerClassName="desktop-no-drag inline-flex max-w-[14rem] items-center gap-1 rounded-md px-1 py-0.5 text-left hover:bg-accent"
-                  onOpenSettings={openProjectSettings}
-                  onDeleteProject={requestDeleteProject}
-                >
-                  <div className="inline-flex max-w-[14rem] items-center gap-1">
-                    <h1 className="min-w-0 truncate text-sm font-semibold">
-                      {displayedProject.name}
-                    </h1>
-                    <RiArrowDownSLine className="size-4 shrink-0 text-muted-foreground" />
-                  </div>
-                </ProjectDropdown>
-              ) : (
-                <h1 className="px-1 py-0.5 text-sm font-semibold text-muted-foreground">
-                  {isGeneralSpaceSelected ? GENERAL_SPACE_NAME : "No Project"}
-                </h1>
-              )}
+            <div className="sticky top-0 z-10 mb-3 flex min-w-0 items-center gap-2 bg-background">
+              <div className="min-w-0 flex-1">
+                {displayedProject ? (
+                  <ProjectDropdown
+                    mode="dropdown-menu"
+                    project={displayedProject}
+                    triggerClassName="desktop-no-drag inline-flex min-w-0 max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-left hover:bg-accent"
+                    onOpenSettings={openProjectSettings}
+                    onDeleteProject={requestDeleteProject}
+                  >
+                    <div
+                      className="inline-flex min-w-0 max-w-full items-center gap-1"
+                      title={displayedProject.name}
+                    >
+                      <h1 className="min-w-0 truncate text-sm font-semibold">
+                        {displayedProject.name}
+                      </h1>
+                      <RiArrowDownSLine className="size-4 shrink-0 text-muted-foreground" />
+                    </div>
+                  </ProjectDropdown>
+                ) : (
+                  <h1 className="truncate px-1 py-0.5 text-sm font-semibold text-muted-foreground">
+                    {isGeneralSpaceSelected ? GENERAL_SPACE_NAME : "No Project"}
+                  </h1>
+                )}
+              </div>
 
               {projectHeaderControl?.kind === "group" ? (
                 <ButtonGroup className="desktop-no-drag shrink-0">

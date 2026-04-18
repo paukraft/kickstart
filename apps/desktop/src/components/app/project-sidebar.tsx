@@ -172,8 +172,8 @@ function ActionItem({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium leading-tight">{command.name}</span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="block min-w-0 flex-1 truncate text-sm font-medium leading-tight">{command.name}</span>
           {command.source === "local" && (
             <span className="shrink-0 text-amber-500/60 dark:text-amber-400/50" title="Personal command (not shared with team)">
               <RiUserLine className="size-3" />
@@ -181,7 +181,7 @@ function ActionItem({
           )}
         </div>
       </div>
-      <div className="desktop-no-drag flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="desktop-no-drag hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
         {tab && (
           <>
             {isRunning ? (
@@ -429,7 +429,7 @@ function TabItem({
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             <div className="min-w-0 flex-1 text-sm font-medium leading-tight">
               {isEditing ? (
                 <input
@@ -453,7 +453,7 @@ function TabItem({
                 />
               ) : (
                 <span
-                  className="block w-fit truncate"
+                  className="block w-full min-w-0 truncate"
                   onClick={
                     active && onDoubleClick
                       ? (e) => {
@@ -481,7 +481,7 @@ function TabItem({
         </div>
       </div>
       {!isEditing && (
-        <div className="desktop-no-drag hidden shrink-0 gap-0.5 group-hover:flex group-focus-within:flex">
+        <div className="desktop-no-drag hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
           {actions}
         </div>
       )}

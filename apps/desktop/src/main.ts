@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -52,10 +53,16 @@ import {
 
 import { AppStore } from "./lib/app-store";
 import {
-  getEditorLaunchCommand,
-  getEditorSystemIconPath,
-  listAvailableEditors,
+  getEditorLaunchCommandAsync,
+  getEditorSystemIconPathAsync,
+  listAvailableEditorsAsync,
 } from "./lib/editor-launcher";
+import {
+  DesktopTelemetryClient,
+  resolvePostHogConfig,
+  type DesktopTelemetryContext,
+  type EmbeddedPostHogConfig,
+} from "./lib/posthog-telemetry";
 import { ensureProjectTab } from "./lib/project-tabs";
 import {
   decomposeResolvedCommands,
@@ -99,9 +106,74 @@ function getWindowBackgroundColor() {
   return nativeTheme.shouldUseDarkColors ? "#09090b" : "#ffffff";
 }
 
+type DesktopPackageMetadata = {
+  kickstart?: {
+    telemetry?: {
+      enabled?: unknown;
+      posthogHost?: unknown;
+      posthogKey?: unknown;
+    };
+    updateMode?: unknown;
+  };
+  version?: unknown;
+};
+
+function resolveDesktopPackageMetadata(): DesktopPackageMetadata | null {
+  const candidatePaths = [
+    path.join(app.getAppPath(), "package.json"),
+    path.join(__dirname, "../package.json"),
+    path.join(process.cwd(), "package.json"),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      if (!existsSync(candidatePath)) {
+        continue;
+      }
+
+      return JSON.parse(readFileSync(candidatePath, "utf8")) as DesktopPackageMetadata;
+    } catch {
+      // Fall through to the next candidate.
+    }
+  }
+
+  return null;
+}
+
+function resolveDesktopAppVersion(packageMetadata: DesktopPackageMetadata | null): string {
+  const version = packageMetadata?.version;
+  if (typeof version === "string" && version.trim().length > 0) {
+    return version.trim();
+  }
+
+  return app.getVersion();
+}
+
+function resolveEmbeddedPostHogConfig(
+  packageMetadata: DesktopPackageMetadata | null,
+): EmbeddedPostHogConfig | null {
+  const telemetry = packageMetadata?.kickstart?.telemetry;
+  if (!telemetry) {
+    return null;
+  }
+
+  return {
+    enabled: typeof telemetry.enabled === "boolean" ? telemetry.enabled : null,
+    host: typeof telemetry.posthogHost === "string" ? telemetry.posthogHost : null,
+    key: typeof telemetry.posthogKey === "string" ? telemetry.posthogKey : null,
+  };
+}
+
+const desktopPackageMetadata = resolveDesktopPackageMetadata();
+const desktopAppVersion = resolveDesktopAppVersion(desktopPackageMetadata);
+const desktopPostHogConfig = resolvePostHogConfig(
+  resolveEmbeddedPostHogConfig(desktopPackageMetadata),
+);
+
 let mainWindow: BrowserWindow | null = null;
 let store: AppStore | null = null;
 let terminalManager: TerminalManager | null = null;
+let telemetry: DesktopTelemetryClient | null = null;
 let isQuitting = false;
 const configWatchers = new Map<string, FSWatcher>();
 let updatePollTimer: ReturnType<typeof setInterval> | null = null;
@@ -128,20 +200,11 @@ function resolvePackagedUpdateMode(): "auto" | "manual" {
     return "auto";
   }
 
-  try {
-    const packageJsonPath = path.join(app.getAppPath(), "package.json");
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
-      kickstart?: { updateMode?: string };
-    };
-
-    return packageJson.kickstart?.updateMode === "manual" ? "manual" : "auto";
-  } catch {
-    return "auto";
-  }
+  return desktopPackageMetadata?.kickstart?.updateMode === "manual" ? "manual" : "auto";
 }
 
 async function listAvailableEditorsWithIcons() {
-  const editors = listAvailableEditors();
+  const editors = await listAvailableEditorsAsync();
 
   if (process.platform !== "darwin" && process.platform !== "win32") {
     return editors;
@@ -149,7 +212,7 @@ async function listAvailableEditorsWithIcons() {
 
   return Promise.all(
     editors.map(async (editor) => {
-      const iconPath = getEditorSystemIconPath(editor.id);
+      const iconPath = await getEditorSystemIconPathAsync(editor.id);
       if (!iconPath) {
         return editor;
       }
@@ -239,7 +302,7 @@ function createInitialDesktopUpdateState(
 }
 
 let updateState: DesktopUpdateState = createInitialDesktopUpdateState(
-  app.getVersion(),
+  desktopAppVersion,
   resolvePackagedUpdateMode(),
 );
 
@@ -558,12 +621,12 @@ async function checkForUpdates(reason: string): Promise<void> {
       }
 
       const latestVersion = await fetchLatestReleaseVersion({
-        allowPrerelease: app.getVersion().includes("-"),
+        allowPrerelease: desktopAppVersion.includes("-"),
         owner: repository.owner,
         repo: repository.repo,
       });
 
-      if (compareVersions(latestVersion, app.getVersion()) > 0) {
+      if (compareVersions(latestVersion, desktopAppVersion) > 0) {
         setUpdateState({
           availableVersion: latestVersion,
           canRetry: true,
@@ -671,7 +734,7 @@ function configureAutoUpdater() {
   updaterConfigured = false;
   releaseChecksConfigured = false;
   setUpdateState({
-    ...createInitialDesktopUpdateState(app.getVersion(), updateMode),
+    ...createInitialDesktopUpdateState(desktopAppVersion, updateMode),
     enabled: releaseChecksEnabled,
     message: releaseChecksEnabled
       ? null
@@ -710,7 +773,7 @@ function configureAutoUpdater() {
     });
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
-    autoUpdater.allowPrerelease = app.getVersion().includes("-");
+    autoUpdater.allowPrerelease = desktopAppVersion.includes("-");
 
     autoUpdater.on("update-available", (info) => {
       setUpdateState({
@@ -867,6 +930,72 @@ function sendTerminalEvent(event: TerminalEvent) {
     return;
   }
   mainWindow.webContents.send("kickstart:terminal-event", event);
+}
+
+async function getDesktopTelemetryUsageMetrics() {
+  const projects = getStore().listProjects();
+
+  const commandCounts = await Promise.all(
+    projects.map(async (project) => {
+      const payload = await loadProjectCommandPayload(getStore(), project);
+      const commands = resolveProjectCommands(payload);
+
+      let sharedCommandCount = 0;
+      let localCommandCount = 0;
+
+      for (const command of commands) {
+        if (command.source === "shared") {
+          sharedCommandCount += 1;
+        } else if (command.source === "local") {
+          localCommandCount += 1;
+        }
+      }
+
+      return {
+        localCommandCount,
+        sharedCommandCount,
+      };
+    }),
+  );
+
+  const sharedCommandCount = commandCounts.reduce((total, entry) => total + entry.sharedCommandCount, 0);
+  const localCommandCount = commandCounts.reduce((total, entry) => total + entry.localCommandCount, 0);
+
+  return {
+    localCommandCount,
+    projectCount: projects.length,
+    sharedCommandCount,
+  } as const;
+}
+
+function markDesktopAppUsed(trigger: "app-activate" | "app-opened" | "window-focus") {
+  void (async () => {
+    if (!(await telemetry?.shouldTrackDailyAppUsed())) {
+      return;
+    }
+    const metrics = await getDesktopTelemetryUsageMetrics();
+    await telemetry?.trackDailyAppUsed(trigger, metrics);
+  })();
+}
+
+function getDesktopTelemetryContext(): DesktopTelemetryContext {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const appLocale = app.getLocale().trim();
+  const systemLocale = app.getSystemLocale().trim();
+  const inferredCountryCode = app.getLocaleCountryCode().trim().toUpperCase();
+
+  return {
+    appLocale: appLocale.length > 0 ? appLocale : null,
+    inferredCountryCode: inferredCountryCode.length > 0 ? inferredCountryCode : null,
+    isPackaged: app.isPackaged,
+    osRelease: os.release(),
+    osVersion: typeof os.version === "function" ? os.version() : null,
+    platform: process.platform,
+    preferredSystemLanguages: app.getPreferredSystemLanguages().slice(0, 5),
+    runningUnderArm64Translation: app.runningUnderARM64Translation,
+    systemLocale: systemLocale.length > 0 ? systemLocale : null,
+    timezone: typeof timezone === "string" && timezone.length > 0 ? timezone : null,
+  };
 }
 
 async function loadProjectConfig(project: ProjectRecord): Promise<ProjectConfigPayload> {
@@ -1208,6 +1337,10 @@ function createWindow() {
     void window.loadFile(getRendererHtmlPath());
   }
 
+  window.on("focus", () => {
+    markDesktopAppUsed("window-focus");
+  });
+
   return window;
 }
 
@@ -1253,7 +1386,7 @@ function registerIpcHandlers() {
   ipcMain.handle(
     "kickstart:open-in-editor",
     async (_event, payload: { editorId: import("@kickstart/contracts").EditorId; path: string }) => {
-      const launch = getEditorLaunchCommand(payload.path, payload.editorId);
+      const launch = await getEditorLaunchCommandAsync(payload.path, payload.editorId);
       await new Promise<void>((resolve, reject) => {
         let child;
 
@@ -1511,6 +1644,13 @@ function registerIpcHandlers() {
 
 async function createAppState() {
   const userDataPath = app.getPath("userData");
+  telemetry = new DesktopTelemetryClient({
+    appVersion: desktopAppVersion,
+    config: desktopPostHogConfig,
+    context: getDesktopTelemetryContext(),
+    productName: app.getName(),
+    userDataPath,
+  });
   store = new AppStore(path.join(userDataPath, "kickstart.sqlite"));
   terminalManager = new TerminalManager({
     historyDir: path.join(userDataPath, "terminal-history"),
@@ -1549,8 +1689,10 @@ app.whenReady().then(async () => {
   configureAutoUpdater();
   registerIpcHandlers();
   mainWindow = createWindow();
+  markDesktopAppUsed("app-opened");
 
   app.on("activate", () => {
+    markDesktopAppUsed("app-activate");
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow();
     }
