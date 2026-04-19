@@ -1,9 +1,9 @@
-import { AppleIcon, GitHubIcon } from "@/components/icons"
 import Image from "next/image"
 import { preload } from "react-dom"
 
 import { DownloadButton } from "@/components/download-dialog-button"
 import { HeroVideo } from "@/components/hero-video"
+import { AppleIcon, GitHubIcon } from "@/components/icons"
 import { Button } from "@/components/ui/button"
 import logoPng from "@kickstart/assets/src/logo.png"
 import { FAQ } from "./faq"
@@ -34,19 +34,45 @@ export default function Page() {
             }}
           />
           <p className="relative text-sm font-medium tracking-widest text-muted-foreground uppercase">
-            The home for all your Terminals!
+            Open-source terminal
           </p>
           <h1 className="relative mt-3 max-w-lg text-4xl font-bold tracking-tight md:max-w-2xl md:text-6xl">
-            Stop losing track of your terminals.
+            One terminal app for every project.
           </h1>
-          <p className="relative mt-4 max-w-md text-lg text-muted-foreground md:max-w-xl md:text-xl">
-            Organized like the Discord app. Repos are servers, terminals are
-            channels. One click to run{" "}
-            <mark className="rounded bg-foreground/10 px-1 text-inherit">
-              npm run dev
-            </mark>{" "}
-            and everything else your project needs.
-          </p>
+          <ul className="relative mt-6 max-w-xl space-y-3 text-lg text-muted-foreground md:text-xl">
+            <li className="flex gap-3">
+              <span aria-hidden className="text-foreground">
+                ›
+              </span>
+              <span>
+                Group terminals by repo, like Discord servers and channels.
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span aria-hidden className="text-foreground">
+                ›
+              </span>
+              <span>
+                One click to run{" "}
+                <mark className="rounded bg-foreground/10 px-1 text-inherit">
+                  npm run dev
+                </mark>
+                ,{" "}
+                <mark className="rounded bg-foreground/10 px-1 text-inherit">
+                  docker compose up
+                </mark>
+                , anything.
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span aria-hidden className="text-foreground">
+                ›
+              </span>
+              <span>
+                See what is running across every project at a glance.
+              </span>
+            </li>
+          </ul>
           <div className="relative mt-8 flex items-center gap-3">
             <DownloadButton size="lg">
               <AppleIcon className="size-5" />

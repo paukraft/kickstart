@@ -16,10 +16,24 @@ const fontMono = JetBrains_Mono({
   variable: "--font-mono",
 })
 
+const title = "Kickstart — One terminal app for every project"
+const description =
+  "Open-source macOS terminal organized like Discord. Group processes by repo, run npm run dev or anything else with one click, see what's running across every project."
+
 export const metadata: Metadata = {
-  title: "Kickstart — Manage dev servers across all your repos",
-  description:
-    "Free macOS app that runs and organizes your dev commands across every project. One click to start everything, one place to see what's running.",
+  title,
+  description,
+  openGraph: {
+    title,
+    description,
+    type: "website",
+    siteName: "Kickstart",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title,
+    description,
+  },
 }
 
 export default function RootLayout({
