@@ -4,10 +4,12 @@ import type { ProjectTabRecord, ResolvedCommandConfig } from "@kickstart/contrac
 import { createCommandTabId, createEffectiveCommandId } from "@kickstart/contracts";
 
 import {
+  didActionSidebarTransitionToStart,
   getBrokenSharedConfigBanner,
   mergeSelectedProjectRuntime,
   reorderCommandsWithinSection,
   reorderRailItems,
+  resolveShellTabCloseAction,
   resolveRefreshedSelectedTabId,
   resolveSelectedProjectId,
   shouldBlockProjectScopedShortcut,
@@ -62,6 +64,29 @@ function createShellTab(input: {
     sortOrder: input.sortOrder,
     title: input.title ?? input.id,
     updatedAt: "2026-04-05T00:00:00.000Z",
+  };
+}
+
+function createSessionSnapshot(input: {
+  hasActiveProcess: boolean;
+  status: "idle" | "booting" | "starting" | "running" | "stopping" | "stopped" | "error";
+}): import("@kickstart/contracts").TerminalSessionSnapshot {
+  return {
+    activeProcessCount: input.hasActiveProcess ? 1 : 0,
+    cols: 120,
+    cwd: "/tmp/project",
+    exitCode: null,
+    hasActiveProcess: input.hasActiveProcess,
+    history: "",
+    kind: "command",
+    lastCommand: input.hasActiveProcess ? "bun run task" : null,
+    managedRunActive: false,
+    pid: 123,
+    projectId: "project-1",
+    rows: 36,
+    status: input.status,
+    tabId: "command:task",
+    updatedAt: "2026-04-19T00:00:00.000Z",
   };
 }
 
@@ -504,6 +529,107 @@ describe("shouldBlockProjectScopedShortcut", () => {
         isProjectStateLoading: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("resolveShellTabCloseAction", () => {
+  it("blocks shell tab closes while the session is transitionary", () => {
+    expect(
+      resolveShellTabCloseAction({
+        activeProcessCount: 0,
+        cols: 120,
+        cwd: "/tmp/project",
+        exitCode: null,
+        hasActiveProcess: false,
+        history: "",
+        kind: "shell",
+        lastCommand: null,
+        managedRunActive: false,
+        pid: 123,
+        projectId: "project-1",
+        rows: 36,
+        status: "booting",
+        tabId: "shell:1",
+        updatedAt: "2026-04-19T00:00:00.000Z",
+      }),
+    ).toBe("blocked");
+  });
+
+  it("confirms before closing a shell tab with active processes", () => {
+    expect(
+      resolveShellTabCloseAction({
+        activeProcessCount: 1,
+        cols: 120,
+        cwd: "/tmp/project",
+        exitCode: null,
+        hasActiveProcess: true,
+        history: "",
+        kind: "shell",
+        lastCommand: "bun dev",
+        managedRunActive: false,
+        pid: 123,
+        projectId: "project-1",
+        rows: 36,
+        status: "running",
+        tabId: "shell:1",
+        updatedAt: "2026-04-19T00:00:00.000Z",
+      }),
+    ).toBe("confirm");
+  });
+
+  it("deletes immediately when the shell tab is idle", () => {
+    expect(resolveShellTabCloseAction(undefined)).toBe("delete");
+    expect(
+      resolveShellTabCloseAction({
+        activeProcessCount: 0,
+        cols: 120,
+        cwd: "/tmp/project",
+        exitCode: null,
+        hasActiveProcess: false,
+        history: "",
+        kind: "shell",
+        lastCommand: null,
+        managedRunActive: false,
+        pid: 123,
+        projectId: "project-1",
+        rows: 36,
+        status: "idle",
+        tabId: "shell:1",
+        updatedAt: "2026-04-19T00:00:00.000Z",
+      }),
+    ).toBe("delete");
+  });
+});
+
+describe("didActionSidebarTransitionToStart", () => {
+  it("does not treat boot completion as an action completion", () => {
+    expect(
+      didActionSidebarTransitionToStart(
+        createSessionSnapshot({
+          hasActiveProcess: false,
+          status: "booting",
+        }),
+        createSessionSnapshot({
+          hasActiveProcess: false,
+          status: "idle",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps treating a finished action run as a completion", () => {
+    expect(
+      didActionSidebarTransitionToStart(
+        createSessionSnapshot({
+          hasActiveProcess: true,
+          status: "running",
+        }),
+        createSessionSnapshot({
+          hasActiveProcess: false,
+          status: "idle",
+        }),
+      ),
+    ).toBe(true);
   });
 });
 

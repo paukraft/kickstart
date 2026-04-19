@@ -5,6 +5,7 @@ import type {
   ProjectTabRecord,
   ProjectWithRuntime,
   ResolvedCommandConfig,
+  TerminalSessionSnapshot,
 } from "@kickstart/contracts";
 
 import { TerminalView } from "@/components/app/terminal-view";
@@ -26,6 +27,7 @@ interface MainContentProps {
   sharedConfigError?: string | null;
   sharedConfigExists: boolean;
   activeTab: ProjectTabRecord | null;
+  activeSession?: TerminalSessionSnapshot | null;
   activeCommand: ResolvedCommandConfig | null;
   onAddProject: () => void;
   onAddLocalCommand: () => void;
@@ -41,6 +43,7 @@ export function MainContent({
   sharedConfigError,
   sharedConfigExists,
   activeTab,
+  activeSession,
   activeCommand: _activeCommand,
   onAddProject,
   onAddLocalCommand,
@@ -53,6 +56,7 @@ export function MainContent({
     return (
       <TerminalView
         projectId={workspaceId ?? project?.id ?? ""}
+        session={activeSession}
         tab={activeTab}
       />
     );

@@ -2,11 +2,40 @@ import type { TabKind } from "./state";
 
 export type TerminalSessionStatus =
   | "idle"
+  | "booting"
   | "starting"
   | "running"
   | "stopping"
   | "stopped"
   | "error";
+
+const TERMINAL_SESSION_TRANSITIONING_STATUSES = new Set<TerminalSessionStatus>([
+  "booting",
+  "starting",
+  "stopping",
+]);
+
+const TERMINAL_SESSION_LOADING_STATUSES = new Set<TerminalSessionStatus>([
+  "starting",
+  "stopping",
+]);
+
+const TERMINAL_SESSION_START_PENDING_STATUSES = new Set<TerminalSessionStatus>([
+  "booting",
+  "starting",
+]);
+
+export function isTerminalSessionTransitioning(status: TerminalSessionStatus) {
+  return TERMINAL_SESSION_TRANSITIONING_STATUSES.has(status);
+}
+
+export function isTerminalSessionLoading(status: TerminalSessionStatus) {
+  return TERMINAL_SESSION_LOADING_STATUSES.has(status);
+}
+
+export function isTerminalSessionStartPending(status: TerminalSessionStatus) {
+  return TERMINAL_SESSION_START_PENDING_STATUSES.has(status);
+}
 
 export interface TerminalSessionSnapshot {
   activeProcessCount: number;

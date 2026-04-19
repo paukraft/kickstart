@@ -76,6 +76,52 @@ describe("TerminalManager history paths", () => {
 });
 
 describe("TerminalManager.open", () => {
+  it("restores persisted history verbatim", async () => {
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => ({
+      kill: vi.fn(),
+      onData: vi.fn(),
+      onExit: vi.fn(),
+      pid: 123,
+      resize: vi.fn(),
+      write: vi.fn(),
+    }));
+
+    const historyDir = createHistoryDir();
+    fs.writeFileSync(
+      path.join(historyDir, "project-1_tab-1.log"),
+      "pnpm test\r\npaukraft@MacBook-Pro-von-Pau repo % ",
+      "utf8",
+    );
+
+    const manager = new TerminalManager({
+      historyDir,
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createTab(),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    const snapshot = await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+
+    expect(snapshot).toMatchObject({
+      history: "pnpm test\r\npaukraft@MacBook-Pro-von-Pau repo % ",
+    });
+  });
+
   it("uses a dedicated shell history file for each tab", async () => {
     const previousShell = process.env.SHELL;
     process.env.SHELL = "/bin/zsh";

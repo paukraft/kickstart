@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import {
   GENERAL_SPACE_ID,
+  isTerminalSessionStartPending,
   type ProjectRecord,
   type ProjectTabRecord,
   type ResolvedCommandConfig,
@@ -192,6 +193,21 @@ function shouldIgnoreUnsettledShellActivity(session: TerminalSessionState) {
     session.lastCommand === null &&
     session.lastOutputAt !== null &&
     Date.now() - session.lastOutputAt < UNSETTLED_SHELL_ACTIVITY_GRACE_MS
+  );
+}
+
+function shouldIgnoreBackgroundShellProcesses(session: TerminalSessionState) {
+  return isShellBooting(session) && !session.shellIntegrationCommandRunning;
+}
+
+function isShellBooting(session: TerminalSessionState) {
+  return (
+    Boolean(session.process) &&
+    !session.promptReady &&
+    !session.startRequested &&
+    session.lastCommand === null &&
+    !session.managedRunActive &&
+    !session.stopRequested
   );
 }
 
@@ -448,14 +464,18 @@ export class TerminalManager {
     session: TerminalSessionState,
     processTable?: ProcessRow[],
   ): Promise<TerminalSessionSnapshot> {
+    const shouldIgnoreDescendantProcesses =
+      session.startupBypassActive ||
+      shouldIgnoreUnsettledShellActivity(session) ||
+      shouldIgnoreBackgroundShellProcesses(session);
     const activeProcessCount = session.shellIntegrationActive
       ? (session.shellIntegrationCommandRunning ? 1 : 0)
-      : session.startupBypassActive || shouldIgnoreUnsettledShellActivity(session)
+      : shouldIgnoreDescendantProcesses
         ? 0
-      : this.countDescendantProcesses(
-          session.process?.pid ?? null,
-          processTable ?? (await this.listProcessTable()),
-        );
+        : this.countDescendantProcesses(
+            session.process?.pid ?? null,
+            processTable ?? (await this.listProcessTable()),
+          );
     const hasActiveProcess = activeProcessCount > 0;
     const status = session.closing
       ? "stopping"
@@ -463,6 +483,8 @@ export class TerminalManager {
       ? "stopped"
       : session.stopRequested
         ? "stopping"
+        : isShellBooting(session)
+          ? "booting"
         : session.startRequested && !hasActiveProcess
           ? "starting"
         : hasActiveProcess
@@ -725,11 +747,12 @@ export class TerminalManager {
     if (!session.promptWait) {
       this.armPromptWait(session);
     }
+    const promptWait = session.promptWait;
     const ready = await Promise.race([
-      session.promptWait!.then(() => true),
+      promptWait!.then(() => true),
       sleep(timeoutMs).then(() => false),
     ]);
-    if (!ready) {
+    if (!ready && session.promptWait === promptWait) {
       this.markPromptReady(session);
     }
     return ready;
@@ -923,6 +946,13 @@ add-zsh-hook preexec _kickstart_preexec
     session.process = pty;
     session.status = "running";
     session.updatedAt = new Date().toISOString();
+    void this.waitForPrompt(session).then((ready) => {
+      if (ready || session.process !== pty) {
+        return;
+      }
+      session.updatedAt = new Date().toISOString();
+      void this.emitSnapshotEvent(session);
+    });
 
     pty.onData((data) => {
       if (session.process !== pty) {
@@ -1032,7 +1062,7 @@ add-zsh-hook preexec _kickstart_preexec
         stopRequested: false,
         startupBypassActive: false,
         startupGate: null,
-        status: "starting",
+        status: "booting",
         tabId: input.tabId,
         updatedAt: new Date().toISOString(),
       };
@@ -1121,6 +1151,7 @@ add-zsh-hook preexec _kickstart_preexec
     if (existingSession?.process) {
       const currentSnapshot = await this.waitForShellIdle(existingSession);
       if (
+        isTerminalSessionStartPending(currentSnapshot.status) ||
         existingSession.managedRunActive ||
         (currentSnapshot.hasActiveProcess && existingSession.lastCommand !== null)
       ) {

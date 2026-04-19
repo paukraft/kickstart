@@ -22,6 +22,8 @@ import {
   createCommandTabId,
   isActionCommand,
   isServiceCommand,
+  isTerminalSessionLoading,
+  isTerminalSessionTransitioning,
   type CommandSource,
   type ProjectTabRecord,
   type ProjectWithRuntime,
@@ -87,7 +89,8 @@ function ActionItem({
     id: tabId,
     index,
   });
-  const isBusy = session?.status === "starting" || session?.status === "stopping";
+  const isTransitioning = session ? isTerminalSessionTransitioning(session.status) : false;
+  const isLoading = session ? isTerminalSessionLoading(session.status) : false;
   const isRunning = Boolean(session?.hasActiveProcess);
 
   return (
@@ -106,7 +109,7 @@ function ActionItem({
       )}
     >
       <AnimatePresence>
-        {isBusy && (
+        {isLoading && (
           <motion.div
             key="loading"
             className="pointer-events-none absolute inset-0 rounded-lg"
@@ -130,7 +133,7 @@ function ActionItem({
             />
           </motion.div>
         )}
-        {isRunning && !isBusy && (
+        {isRunning && !isLoading && (
           <motion.div
             key="running"
             className="pointer-events-none absolute inset-0 rounded-lg"
@@ -163,7 +166,7 @@ function ActionItem({
         )}
       </AnimatePresence>
       <div className="flex size-5 shrink-0 items-center justify-center">
-        {isBusy ? (
+        {isLoading ? (
           <RiLoader4Line className="size-3.5 animate-spin" />
         ) : isRunning ? (
           <AnimatedBars size={12} color={RUNTIME_COLORS.running} barWidth={1.5} gap={0.5} />
@@ -181,19 +184,25 @@ function ActionItem({
           )}
         </div>
       </div>
-      <div className="desktop-no-drag hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
+      <div
+        className={cn(
+          "desktop-no-drag flex shrink-0 items-center gap-0.5 transition-opacity",
+          "opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100",
+          "group-hover:pointer-events-auto group-focus-within:pointer-events-auto",
+        )}
+      >
         {tab && (
           <>
             {isRunning ? (
               <>
                 <Button
-                  disabled={isBusy}
+                  disabled={isTransitioning}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(e) => {
                     triggerInlineControl(e, () => {
-                      if (isBusy) return;
+                      if (isTransitioning) return;
                       onRestart();
                     });
                   }}
@@ -201,13 +210,13 @@ function ActionItem({
                   <RiRefreshLine />
                 </Button>
                 <Button
-                  disabled={isBusy}
+                  disabled={isTransitioning}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(e) => {
                     triggerInlineControl(e, () => {
-                      if (isBusy) return;
+                      if (isTransitioning) return;
                       onStop();
                     });
                   }}
@@ -217,18 +226,18 @@ function ActionItem({
               </>
             ) : (
               <Button
-                disabled={isBusy}
+                disabled={isTransitioning}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
                 onClick={(e) => {
                   triggerInlineControl(e, () => {
-                    if (isBusy) return;
+                    if (isTransitioning) return;
                     onRun();
                   });
                 }}
               >
-                {isBusy ? (
+                {isLoading ? (
                   <RiLoader4Line className="animate-spin" />
                 ) : (
                   <RiPlayLine />
@@ -261,6 +270,7 @@ interface TabItemProps {
   active: boolean;
   isEditing?: boolean;
   editDraft?: string;
+  isBooting?: boolean;
   isLoading?: boolean;
   isPersonal?: boolean;
   isRunning?: boolean;
@@ -282,6 +292,7 @@ function TabItem({
   active,
   isEditing = false,
   editDraft,
+  isBooting = false,
   isLoading = false,
   isPersonal = false,
   isRunning = false,
@@ -370,6 +381,19 @@ function TabItem({
             />
           </motion.div>
         )}
+        {isBooting && !isLoading && (
+          <motion.svg
+            key="booting"
+            className="pointer-events-none absolute inset-0 h-full w-full"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.8, ease: "easeInOut" }}
+            aria-hidden
+          >
+            <rect className="booting-rect" pathLength={1} />
+          </motion.svg>
+        )}
         {isRunning && !isLoading && (
           <motion.div
             key="running"
@@ -410,7 +434,10 @@ function TabItem({
         )}
       </AnimatePresence>
       <div
-        className="flex min-w-0 flex-1 items-center gap-2.5"
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2.5 transition-opacity",
+          isBooting && "opacity-60",
+        )}
         onMouseDown={onMouseDown}
       >
         <div className={cn(
@@ -481,7 +508,13 @@ function TabItem({
         </div>
       </div>
       {!isEditing && (
-        <div className="desktop-no-drag hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
+        <div
+          className={cn(
+            "desktop-no-drag flex shrink-0 items-center gap-0.5 transition-opacity",
+            "opacity-0 pointer-events-none group-hover:opacity-100 group-focus-within:opacity-100",
+            "group-hover:pointer-events-auto group-focus-within:pointer-events-auto",
+          )}
+        >
           {actions}
         </div>
       )}
@@ -594,14 +627,18 @@ function SortableTabItem({
 
   const command = tab.kind === "command" ? commandByTabId(commands, tab.id) : null;
   const session = terminalSessions[tab.id];
-  const isLoading = session?.status === "starting" || session?.status === "stopping";
+  const isTransitioning = session ? isTerminalSessionTransitioning(session.status) : false;
+  const isLoading = session ? isTerminalSessionLoading(session.status) : false;
+  const isBooting = session?.status === "booting";
   const isRunning = Boolean(session?.hasActiveProcess);
   const isEditing = tab.kind === "shell" && renamingShellTabId === tab.id;
-  const subtitle = session?.lastCommand
-    ? `Last: ${session.lastCommand}`
-    : tab.kind === "command"
-      ? `${command?.source === "local" ? "Personal" : "Shared"} · ${command?.type === "action" ? "Action" : "Service"} · ${command?.startMode === "auto" ? "Auto" : "Manual"}`
-      : "Shell";
+  const subtitle = isBooting
+    ? "Booting…"
+    : session?.lastCommand
+      ? `Last: ${session.lastCommand}`
+      : tab.kind === "command"
+        ? `${command?.source === "local" ? "Personal" : "Shared"} · ${command?.type === "action" ? "Action" : "Service"} · ${command?.startMode === "auto" ? "Auto" : "Manual"}`
+        : "Shell";
 
   return (
     <TabItem
@@ -609,6 +646,7 @@ function SortableTabItem({
       isDragging={isDragging}
       isEditing={isEditing}
       editDraft={shellRenameDraft}
+      isBooting={isBooting}
       isLoading={isLoading}
       isPersonal={command?.source === "local"}
       isRunning={isRunning}
@@ -618,7 +656,7 @@ function SortableTabItem({
       itemRef={ref as (element: HTMLDivElement | null) => void}
       onClick={() => onSelectTab(tab.id)}
       onDoubleClick={
-        tab.kind === "shell" && !isLoading
+        tab.kind === "shell" && !isTransitioning
           ? () => onBeginShellRename?.(tab)
           : undefined
       }
@@ -628,7 +666,7 @@ function SortableTabItem({
       onMouseDown={
         tab.kind === "shell"
           ? (event) => {
-              if (isLoading) return;
+              if (isTransitioning) return;
               if (event.button !== 1) return;
               event.preventDefault();
               event.stopPropagation();
@@ -642,13 +680,13 @@ function SortableTabItem({
             {isRunning ? (
               <>
                 <Button
-                  disabled={isLoading}
+                  disabled={isTransitioning}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(event) => {
                     triggerInlineControl(event, () => {
-                      if (isLoading) return;
+                      if (isTransitioning) return;
                       onRestartTab(tab);
                     });
                   }}
@@ -656,13 +694,13 @@ function SortableTabItem({
                   <RiRefreshLine />
                 </Button>
                 <Button
-                  disabled={isLoading}
+                  disabled={isTransitioning}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(event) => {
                     triggerInlineControl(event, () => {
-                      if (isLoading) return;
+                      if (isTransitioning) return;
                       onStopTab(tab);
                     });
                   }}
@@ -672,13 +710,13 @@ function SortableTabItem({
               </>
             ) : (
               <Button
-                disabled={isLoading}
+                disabled={isTransitioning}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
                 onClick={(event) => {
                   triggerInlineControl(event, () => {
-                    if (isLoading) return;
+                    if (isTransitioning) return;
                     onRunTab(tab);
                   });
                 }}
@@ -692,7 +730,7 @@ function SortableTabItem({
             )}
             {command && (
               <Button
-                disabled={isLoading}
+                disabled={isTransitioning}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
@@ -706,13 +744,13 @@ function SortableTabItem({
           </>
         ) : (
           <Button
-            disabled={isLoading}
+            disabled={isTransitioning}
             size="icon-xs"
             type="button"
             variant="ghost"
             onClick={(event) => {
               triggerInlineControl(event, () => {
-                if (isLoading) return;
+                if (isTransitioning) return;
                 onDeleteShellTab(tab.id);
               });
             }}

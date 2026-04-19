@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
 
+import { isTerminalSessionStartPending } from "@kickstart/contracts";
 import type {
   ProjectTabRecord,
   TerminalEvent,
+  TerminalSessionSnapshot,
 } from "@kickstart/contracts";
 
 import { getPrefersDarkMode, useDarkMode } from "@/lib/media-preferences";
@@ -64,6 +66,57 @@ function shellEscapePath(path: string) {
   return `'${path.replaceAll("'", "'\\''")}'`;
 }
 
+type SnapshotTerminalEvent = Extract<TerminalEvent, { snapshot: TerminalSessionSnapshot }>;
+
+const ANSI_ESCAPE_SEQUENCE_PATTERN = String.raw`\x1b`;
+const TRANSIENT_ZSH_PROMPT_PLACEHOLDER_PATTERN = new RegExp(
+  String.raw`${ANSI_ESCAPE_SEQUENCE_PATTERN}\[1m${ANSI_ESCAPE_SEQUENCE_PATTERN}\[7m%${ANSI_ESCAPE_SEQUENCE_PATTERN}\[27m${ANSI_ESCAPE_SEQUENCE_PATTERN}\[1m${ANSI_ESCAPE_SEQUENCE_PATTERN}\[0m[^\S\r\n]*\r[^\S\r\n]*\r`,
+  "g",
+);
+
+export function normalizeTerminalReplayHistory(history: string) {
+  return history.replaceAll(TRANSIENT_ZSH_PROMPT_PLACEHOLDER_PATTERN, "");
+}
+
+export function shouldReplaceRenderedTerminalHistory(args: {
+  allowTruncate?: boolean;
+  currentHistory: string | null;
+  nextHistory: string;
+}) {
+  if (args.currentHistory === args.nextHistory) {
+    return false;
+  }
+  if (
+    args.allowTruncate === false &&
+    args.currentHistory !== null &&
+    args.currentHistory.startsWith(args.nextHistory)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function shouldReplaySnapshotForTerminalEvent(
+  event: TerminalEvent,
+): event is SnapshotTerminalEvent {
+  return event.type === "started" || event.type === "updated" || event.type === "cleared";
+}
+
+export function shouldTruncateTerminalHistory(type: SnapshotTerminalEvent["type"]) {
+  return type === "cleared";
+}
+
+export function shouldForceReplaySettledTerminalSnapshot(args: {
+  nextStatus: TerminalSessionSnapshot["status"];
+  previousStatus: TerminalSessionSnapshot["status"] | null;
+}) {
+  return (
+    args.previousStatus !== null &&
+    isTerminalSessionStartPending(args.previousStatus) &&
+    !isTerminalSessionStartPending(args.nextStatus)
+  );
+}
+
 function parseUriList(uriList: string) {
   return uriList
     .split(/\r?\n/)
@@ -98,18 +151,25 @@ function getDroppedPaths(dataTransfer: DataTransfer) {
 
 export function TerminalView({
   projectId,
+  session,
   tab,
 }: {
   projectId: string;
+  session?: TerminalSessionSnapshot | null;
   tab: ProjectTabRecord;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const renderedHistoryRef = useRef<string | null>(null);
+  const latestSessionHistoryRef = useRef<string | null>(null);
+  const latestSessionStatusRef = useRef<TerminalSessionSnapshot["status"] | null>(session?.status ?? null);
   const dragDepthRef = useRef(0);
   const isDark = useDarkMode();
   const [exitHint, setExitHint] = useState<string | null>(null);
+  const sessionHistory = session?.history ?? null;
+  latestSessionHistoryRef.current = sessionHistory;
+  latestSessionStatusRef.current = session?.status ?? null;
 
   // Update xterm theme when OS preference changes
   useEffect(() => {
@@ -141,12 +201,26 @@ export function TerminalView({
     fitAddonRef.current = fitAddon;
     renderedHistoryRef.current = null;
 
-    function renderSnapshot(history: string) {
-      if (renderedHistoryRef.current === history) {
+    function renderSnapshot(history: string, options?: { allowTruncate?: boolean; forceReplay?: boolean }) {
+      const nextRenderedHistory = normalizeTerminalReplayHistory(history);
+      if (
+        !options?.forceReplay &&
+        !shouldReplaceRenderedTerminalHistory({
+          allowTruncate: options?.allowTruncate,
+          currentHistory:
+            renderedHistoryRef.current === null
+              ? null
+              : normalizeTerminalReplayHistory(renderedHistoryRef.current),
+          nextHistory: nextRenderedHistory,
+        })
+      ) {
         return;
       }
-      replayGuard.replay(terminal, `\u001bc${history}`);
+      replayGuard.replay(terminal, `\u001bc${nextRenderedHistory}`);
       renderedHistoryRef.current = history;
+    }
+    if (latestSessionHistoryRef.current !== null) {
+      renderSnapshot(latestSessionHistoryRef.current, { allowTruncate: false });
     }
 
     const writeDisposable = terminal.onData((data) => {
@@ -252,9 +326,19 @@ export function TerminalView({
         renderedHistoryRef.current = `${renderedHistoryRef.current ?? ""}${event.data}`;
         return;
       }
-      if (event.type === "started" || event.type === "cleared") {
+      if (shouldReplaySnapshotForTerminalEvent(event)) {
         setExitHint(null);
-        renderSnapshot(event.snapshot.history);
+        const forceReplay =
+          event.type === "updated" &&
+          shouldForceReplaySettledTerminalSnapshot({
+            nextStatus: event.snapshot.status,
+            previousStatus: latestSessionStatusRef.current,
+          });
+        renderSnapshot(event.snapshot.history, {
+          allowTruncate: shouldTruncateTerminalHistory(event.type),
+          forceReplay,
+        });
+        latestSessionStatusRef.current = event.snapshot.status;
         return;
       }
       if (event.type === "error") {
@@ -285,7 +369,8 @@ export function TerminalView({
           terminal.write(systemMessage("Terminal tab is no longer available."));
           return;
         }
-        renderSnapshot(snapshot.history);
+        renderSnapshot(snapshot.history, { allowTruncate: false });
+        latestSessionStatusRef.current = snapshot.status;
         terminal.focus();
       })
       .catch((error) => {

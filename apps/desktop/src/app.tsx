@@ -15,6 +15,7 @@ import {
   type DesktopUpdateState,
   type EffectiveCommandId,
   isAutoStartCommand,
+  isTerminalSessionTransitioning,
   type ProjectConfigPayload,
   type ProjectGroupRecord,
   type ProjectTabRecord,
@@ -204,18 +205,25 @@ const RUNTIME_EVENT_TYPES = new Set<TerminalEvent["type"]>([
 function showsSidebarStartAction(session: TerminalSessionSnapshot | undefined) {
   return (
     !session ||
-    (!session.hasActiveProcess &&
-      session.status !== "starting" &&
-      session.status !== "stopping")
+    (!session.hasActiveProcess && !isTerminalSessionTransitioning(session.status))
   );
 }
 
-function didActionSidebarTransitionToStart(
+export function resolveShellTabCloseAction(session: TerminalSessionSnapshot | undefined) {
+  if (session && isTerminalSessionTransitioning(session.status)) {
+    return "blocked" as const;
+  }
+  return session?.hasActiveProcess ? "confirm" as const : "delete" as const;
+}
+
+export function didActionSidebarTransitionToStart(
   previous: TerminalSessionSnapshot | undefined,
   next: TerminalSessionSnapshot | undefined,
 ) {
   const previouslyBlocked =
-    previous !== undefined && !showsSidebarStartAction(previous);
+    previous !== undefined &&
+    previous.status !== "booting" &&
+    !showsSidebarStartAction(previous);
   return previouslyBlocked && showsSidebarStartAction(next);
 }
 
@@ -1178,11 +1186,11 @@ export function App() {
   }
 
   function requestDeleteShellTab(tabId: string) {
-    const session = terminalSessions[tabId];
-    if (session?.status === "stopping") {
+    const closeAction = resolveShellTabCloseAction(terminalSessions[tabId]);
+    if (closeAction === "blocked") {
       return;
     }
-    if (session?.hasActiveProcess) {
+    if (closeAction === "confirm") {
       setPendingShellCloseTabId(tabId);
       return;
     }
@@ -1921,6 +1929,7 @@ export function App() {
                     : (projectConfig?.shared.configExists ?? false)
                 }
                 activeTab={activeTab}
+                activeSession={activeTab ? terminalSessions[activeTab.id] ?? null : null}
                 activeCommand={activeCommand}
                 onAddProject={() => void handleAddProject()}
                 onAddLocalCommand={() => openCreateCommandDialog("local")}

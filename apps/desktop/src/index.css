@@ -177,3 +177,25 @@
 .scrollbar-hidden::-webkit-scrollbar {
   display: none;
 }
+
+@keyframes booting-stroke {
+  to {
+    stroke-dashoffset: -1;
+  }
+}
+
+.booting-rect {
+  x: 1px;
+  y: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  rx: 8px;
+  ry: 8px;
+  fill: none;
+  stroke: currentColor;
+  stroke-opacity: 0.75;
+  stroke-width: 1.25;
+  stroke-dasharray: 0.25 0.75;
+  stroke-linecap: round;
+  animation: booting-stroke 2.6s linear infinite;
+}

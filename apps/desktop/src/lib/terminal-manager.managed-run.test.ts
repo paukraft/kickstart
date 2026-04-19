@@ -24,6 +24,13 @@ function createTab(kind: "command" | "shell" = "command") {
   };
 }
 
+function createCommandTab() {
+  return {
+    ...createTab(),
+    commandId: "dev",
+  };
+}
+
 function createSnapshot(overrides: Partial<TerminalSessionSnapshot> = {}) {
   return {
     activeProcessCount: 0,
@@ -250,6 +257,71 @@ describe("TerminalManager managed runs", () => {
         type: "updated",
       }),
     );
+  });
+
+  it("does not relaunch a command while its shell is still booting", async () => {
+    const writeMock = vi.fn();
+
+    spawnMock.mockImplementation(() => ({
+      kill: vi.fn(),
+      onData: vi.fn(),
+      onExit: vi.fn(),
+      pid: 123,
+      resize: vi.fn(),
+      write: writeMock,
+    }));
+
+    const manager = new TerminalManager({
+      historyDir: "/tmp/kickstart-terminal-manager-test",
+      loadCommand: async () => ({
+        command: "pnpm dev",
+        cwd: ".",
+        env: {},
+        id: "shared:dev",
+        name: "Dev",
+        source: "shared",
+        sourceCommandId: "dev",
+        soundId: null,
+        startMode: "manual",
+        type: "service",
+      }),
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createCommandTab(),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+
+    expect(spawnMock).toHaveBeenCalledOnce();
+
+    const openSpy = vi.spyOn(manager, "open");
+    openSpy.mockClear();
+
+    const snapshot = await manager.runCommand({
+      projectId: "project-1",
+      tabId: "tab-1",
+    });
+
+    expect(snapshot).toMatchObject({
+      hasActiveProcess: false,
+      status: "booting",
+    });
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(spawnMock).toHaveBeenCalledOnce();
+    expect(writeMock).not.toHaveBeenCalledWith("pnpm dev\r");
   });
 
   it("restarts a running managed command by stopping first and then running again", async () => {
@@ -771,6 +843,7 @@ describe("TerminalManager managed runs", () => {
       expect.objectContaining({
         snapshot: expect.objectContaining({
           hasActiveProcess: false,
+          status: "booting",
         }),
         tabId: "tab-1",
         type: "started",
@@ -778,7 +851,7 @@ describe("TerminalManager managed runs", () => {
     );
   });
 
-  it("only treats shell startup noise as idle for a short grace period", async () => {
+  it("keeps a freshly opened shell booting until the prompt arrives", async () => {
     vi.useFakeTimers();
 
     try {
@@ -850,10 +923,22 @@ describe("TerminalManager managed runs", () => {
 
       expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
         hasActiveProcess: false,
-        status: "idle",
+        status: "booting",
       });
 
       await vi.advanceTimersByTimeAsync(400);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
+        hasActiveProcess: false,
+        status: "booting",
+      });
+
+      for (const handler of onDataHandlers) {
+        handler("paukraft@mac repo % ");
+      }
+
       await Promise.resolve();
       await Promise.resolve();
 
@@ -865,5 +950,126 @@ describe("TerminalManager managed runs", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("falls back out of booting when prompt detection times out", async () => {
+    vi.useFakeTimers();
+
+    try {
+      spawnMock.mockImplementation(() => ({
+        kill: vi.fn(),
+        onData: vi.fn(),
+        onExit: vi.fn(),
+        pid: 123,
+        resize: vi.fn(),
+        write: vi.fn(),
+      }));
+
+      const manager = new TerminalManager({
+        historyDir: "/tmp/kickstart-terminal-manager-test",
+        loadCommand: async () => null,
+        loadProject: async () => ({
+          createdAt: "",
+          id: "project-1",
+          name: "Project",
+          path: "/tmp/project",
+          sortOrder: 0,
+          updatedAt: "",
+        }),
+        loadTab: async () => createTab(),
+        onEvent: vi.fn(),
+        persistTabCwd: vi.fn(),
+      });
+
+      await manager.open({
+        cols: 120,
+        projectId: "project-1",
+        rows: 36,
+        tabId: "tab-1",
+      });
+
+      expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
+        hasActiveProcess: false,
+        status: "booting",
+      });
+
+      await vi.advanceTimersByTimeAsync(8_000);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
+        activeProcessCount: 0,
+        hasActiveProcess: false,
+        status: "idle",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts background descendant processes again once the prompt is ready", async () => {
+    const onDataHandlers: Array<(data: string) => void> = [];
+
+    spawnMock.mockImplementation(() => ({
+      kill: vi.fn(),
+      onData: (handler: (data: string) => void) => {
+        onDataHandlers.push(handler);
+      },
+      onExit: vi.fn(),
+      pid: 123,
+      resize: vi.fn(),
+      write: vi.fn(),
+    }));
+
+    const manager = new TerminalManager({
+      historyDir: "/tmp/kickstart-terminal-manager-test",
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createTab(),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    vi.spyOn(manager as any, "listProcessTable").mockResolvedValue([
+      {
+        comm: "/bin/zsh",
+        pid: 456,
+        ppid: 123,
+        stat: "S+",
+      },
+      {
+        comm: "/opt/homebrew/bin/starship",
+        pid: 457,
+        ppid: 123,
+        stat: "S+",
+      },
+    ]);
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+
+    for (const handler of onDataHandlers) {
+      handler("paukraft@mac repo % ");
+    }
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
+      activeProcessCount: 1,
+      hasActiveProcess: true,
+      status: "running",
+    });
   });
 });

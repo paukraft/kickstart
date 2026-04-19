@@ -14,6 +14,7 @@ import {
   createCommandTabId,
   isAutoStartCommand,
   createEffectiveCommandId,
+  isTerminalSessionTransitioning,
   parseEffectiveCommandId,
   type ConfigChangedPayload,
   type CreateGroupFromProjectsInput,
@@ -71,6 +72,7 @@ import {
   persistSharedProjectConfig,
   resolveProjectCommands,
 } from "./lib/project-command-state";
+import { resolveProjectRuntimeState } from "./lib/project-runtime";
 import { getShortcutDefinitionsForMenu } from "./lib/shortcuts";
 import { TerminalManager } from "./lib/terminal-manager";
 
@@ -1016,7 +1018,7 @@ async function syncProjectTabs(projectId: string, payload: ProjectConfigPayload)
   const runningTabIds = new Set(
     sessions
       .filter((session) =>
-        session.hasActiveProcess || session.status === "starting" || session.status === "stopping",
+        session.hasActiveProcess || isTerminalSessionTransitioning(session.status),
       )
       .map((session) => session.tabId),
   );
@@ -1059,20 +1061,12 @@ async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
       const trackedTabIdSet = new Set<string>(trackedTabIds);
       const sessions = await getTerminalManager().getProjectSessions(project.id);
       const trackedSessions = sessions.filter((session) => trackedTabIdSet.has(session.tabId));
-      const runningCommandCount = trackedSessions.filter((session) => session.hasActiveProcess).length;
       const startupCommandCount = startupCommandIds.length;
-      const hasStartingCommand = trackedSessions.some((session) => session.status === "starting");
-      const hasStoppingCommand = trackedSessions.some((session) => session.status === "stopping");
-      const runtimeState =
-        hasStartingCommand
-          ? "starting"
-          : hasStoppingCommand
-            ? "stopping"
-          : runningCommandCount === 0
-          ? "not-running"
-          : runningCommandCount === startupCommandCount
-            ? "running"
-            : "partially-running";
+      const runningCommandCount = trackedSessions.filter((session) => session.hasActiveProcess).length;
+      const runtimeState = resolveProjectRuntimeState({
+        sessions: trackedSessions,
+        startupCommandCount,
+      });
       const favicon = await resolveProjectFavicon(project.path);
       return {
         groupId: project.groupId,
