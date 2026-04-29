@@ -69,7 +69,8 @@ function createShellTab(input: {
 
 function createSessionSnapshot(input: {
   hasActiveProcess: boolean;
-  status: "idle" | "booting" | "starting" | "running" | "stopping" | "stopped" | "error";
+  operation?: "none" | "starting" | "stopping" | "restarting";
+  status: "idle" | "booting" | "running" | "stopped" | "error";
 }): import("@kickstart/contracts").TerminalSessionSnapshot {
   return {
     activeProcessCount: input.hasActiveProcess ? 1 : 0,
@@ -81,6 +82,8 @@ function createSessionSnapshot(input: {
     kind: "command",
     lastCommand: input.hasActiveProcess ? "bun run task" : null,
     managedRunActive: false,
+    operation: input.operation ?? "none",
+    outputRevision: 0,
     pid: 123,
     projectId: "project-1",
     rows: 36,
@@ -545,6 +548,8 @@ describe("resolveShellTabCloseAction", () => {
         kind: "shell",
         lastCommand: null,
         managedRunActive: false,
+        operation: "none",
+        outputRevision: 0,
         pid: 123,
         projectId: "project-1",
         rows: 36,
@@ -567,6 +572,8 @@ describe("resolveShellTabCloseAction", () => {
         kind: "shell",
         lastCommand: "bun dev",
         managedRunActive: false,
+        operation: "none",
+        outputRevision: 0,
         pid: 123,
         projectId: "project-1",
         rows: 36,
@@ -590,6 +597,8 @@ describe("resolveShellTabCloseAction", () => {
         kind: "shell",
         lastCommand: null,
         managedRunActive: false,
+        operation: "none",
+        outputRevision: 0,
         pid: 123,
         projectId: "project-1",
         rows: 36,

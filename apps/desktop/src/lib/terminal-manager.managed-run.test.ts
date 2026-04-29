@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import type { TerminalSessionSnapshot } from "@kickstart/contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,7 +16,7 @@ import { TerminalManager } from "./terminal-manager";
 function createTab(kind: "command" | "shell" = "command") {
   const timestamp = new Date().toISOString();
   return {
-    commandId: null,
+    commandId: kind === "command" ? "dev" : null,
     createdAt: timestamp,
     id: "tab-1",
     kind,
@@ -21,13 +25,6 @@ function createTab(kind: "command" | "shell" = "command") {
     sortOrder: 0,
     title: "Tab 1",
     updatedAt: timestamp,
-  };
-}
-
-function createCommandTab() {
-  return {
-    ...createTab(),
-    commandId: "dev",
   };
 }
 
@@ -42,6 +39,8 @@ function createSnapshot(overrides: Partial<TerminalSessionSnapshot> = {}) {
     kind: "command" as const,
     lastCommand: "bid",
     managedRunActive: false,
+    operation: "none" as const,
+    outputRevision: 0,
     pid: 123,
     projectId: "project-1",
     rows: 36,
@@ -82,7 +81,16 @@ describe("TerminalManager managed runs", () => {
 
     const manager = new TerminalManager({
       historyDir: "/tmp/kickstart-terminal-manager-test",
-      loadCommand: async () => null,
+      loadCommand: async () => ({
+        command: "pnpm dev",
+        cwd: ".",
+        id: "shared:dev",
+        name: "Dev",
+        source: "shared",
+        sourceCommandId: "dev",
+        startMode: "manual",
+        type: "service",
+      }),
       loadProject: async () => ({
         createdAt: "",
         id: "project-1",
@@ -111,6 +119,100 @@ describe("TerminalManager managed runs", () => {
     expect(spawnMock).toHaveBeenCalledOnce();
     expect(spawnMock.mock.calls[0]?.[1]).toEqual(["-l"]);
     expect(writeMock).toHaveBeenCalledWith("bid\r");
+  });
+
+  it("uses the latest resolved command cwd when starting an existing command session", async () => {
+    let commandCwd = "apps/web";
+    const ptys: Array<{
+      emitData: (data: string) => void;
+      onDataHandlers: Array<(data: string) => void>;
+      write: ReturnType<typeof vi.fn>;
+    }> = [];
+
+    spawnMock.mockImplementation(() => {
+      const pty = {
+        emitData(data: string) {
+          for (const handler of pty.onDataHandlers) {
+            handler(data);
+          }
+        },
+        kill: vi.fn(),
+        onDataHandlers: [] as Array<(data: string) => void>,
+        onData(handler: (data: string) => void) {
+          pty.onDataHandlers.push(handler);
+        },
+        onExit: vi.fn(),
+        pid: 123 + ptys.length,
+        resize: vi.fn(),
+        write: vi.fn(),
+      };
+      ptys.push(pty);
+      queueMicrotask(() => {
+        pty.emitData("paukraft@mac repo % ");
+      });
+      return pty;
+    });
+
+    const manager = new TerminalManager({
+      historyDir: "/tmp/kickstart-terminal-manager-test",
+      loadCommand: async () => ({
+        command: "pnpm dev",
+        cwd: commandCwd,
+        id: "shared:dev",
+        name: "Dev",
+        source: "shared",
+        sourceCommandId: "dev",
+        startMode: "manual",
+        type: "service",
+      }),
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createTab(),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+    expect(spawnMock.mock.calls[0]?.[2]).toMatchObject({
+      cwd: "/tmp/project/apps/web",
+    });
+
+    vi.spyOn(manager as any, "snapshot").mockResolvedValue(
+      createSnapshot({
+        cwd: "/tmp/project/apps/web",
+        status: "idle",
+      }),
+    );
+
+    commandCwd = "packages/core";
+    await manager.runCommand({
+      projectId: "project-1",
+      tabId: "tab-1",
+    });
+
+    for (let i = 0; i < 10 && !ptys[1]?.write.mock.calls.length; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock.mock.calls[1]?.[2]).toMatchObject({
+      cwd: "/tmp/project/packages/core",
+    });
+    expect(ptys[1]?.write).toHaveBeenCalledWith("pnpm dev\r");
+    expect((manager as any).sessions.get("project-1:tab-1").cwd).toBe(
+      "/tmp/project/packages/core",
+    );
   });
 
   it("emits an updated snapshot when a stopped managed command returns to the prompt", async () => {
@@ -161,6 +263,7 @@ describe("TerminalManager managed runs", () => {
 
     const snapshotSpy = vi.spyOn(manager as any, "snapshot");
     snapshotSpy.mockResolvedValueOnce(activeSnapshot);
+    snapshotSpy.mockResolvedValueOnce(activeSnapshot);
     snapshotSpy.mockResolvedValueOnce(idleSnapshot);
 
     vi.spyOn(manager as any, "waitForShellIdle").mockReturnValue(new Promise(() => {}));
@@ -173,6 +276,8 @@ describe("TerminalManager managed runs", () => {
       tabId: "tab-1",
     });
 
+    await Promise.resolve();
+    await Promise.resolve();
     expect(writeMock).toHaveBeenLastCalledWith("\u0003");
 
     for (const handler of onDataHandlers) {
@@ -244,6 +349,8 @@ describe("TerminalManager managed runs", () => {
       tabId: "tab-1",
     });
 
+    await Promise.resolve();
+    await Promise.resolve();
     expect(writeMock).toHaveBeenLastCalledWith("\u0003");
 
     await Promise.resolve();
@@ -259,7 +366,7 @@ describe("TerminalManager managed runs", () => {
     );
   });
 
-  it("does not relaunch a command while its shell is still booting", async () => {
+  it("does not let a stale background stop clear a newer start request", async () => {
     const writeMock = vi.fn();
 
     spawnMock.mockImplementation(() => ({
@@ -273,18 +380,7 @@ describe("TerminalManager managed runs", () => {
 
     const manager = new TerminalManager({
       historyDir: "/tmp/kickstart-terminal-manager-test",
-      loadCommand: async () => ({
-        command: "pnpm dev",
-        cwd: ".",
-        env: {},
-        id: "shared:dev",
-        name: "Dev",
-        source: "shared",
-        sourceCommandId: "dev",
-        soundId: null,
-        startMode: "manual",
-        type: "service",
-      }),
+      loadCommand: async () => null,
       loadProject: async () => ({
         createdAt: "",
         id: "project-1",
@@ -293,7 +389,7 @@ describe("TerminalManager managed runs", () => {
         sortOrder: 0,
         updatedAt: "",
       }),
-      loadTab: async () => createCommandTab(),
+      loadTab: async () => createTab(),
       onEvent: vi.fn(),
       persistTabCwd: vi.fn(),
     });
@@ -305,23 +401,238 @@ describe("TerminalManager managed runs", () => {
       tabId: "tab-1",
     });
 
-    expect(spawnMock).toHaveBeenCalledOnce();
+    const activeSnapshot = createSnapshot({
+      activeProcessCount: 1,
+      hasActiveProcess: true,
+      managedRunActive: true,
+    });
 
-    const openSpy = vi.spyOn(manager, "open");
-    openSpy.mockClear();
+    vi.spyOn(manager as any, "snapshot").mockResolvedValue(activeSnapshot);
+    const idleResolvers: Array<(snapshot: TerminalSessionSnapshot) => void> = [];
+    vi.spyOn(manager as any, "waitForShellIdle").mockImplementation(
+      () =>
+        new Promise<TerminalSessionSnapshot>((resolve) => {
+          idleResolvers.push(resolve);
+        }),
+    );
+    const sendInterruptBurstSpy = vi.spyOn(manager as any, "sendInterruptBurst");
 
-    const snapshot = await manager.runCommand({
+    await manager.stopCommand({
       projectId: "project-1",
       tabId: "tab-1",
     });
 
-    expect(snapshot).toMatchObject({
-      hasActiveProcess: false,
-      status: "booting",
+    const session = (manager as any).sessions.get("project-1:tab-1");
+    session.desiredRunState = "running";
+    session.pendingStartRequest = true;
+    session.operation = "starting";
+
+    idleResolvers[0]?.(activeSnapshot);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sendInterruptBurstSpy).not.toHaveBeenCalled();
+    expect(session.operation).toBe("starting");
+  });
+
+  it("clears a pending start when stop cancels before a process is available", async () => {
+    spawnMock.mockImplementation(() => ({
+      kill: vi.fn(),
+      onData: vi.fn(),
+      onExit: vi.fn(),
+      pid: 123,
+      resize: vi.fn(),
+      write: vi.fn(),
+    }));
+
+    const manager = new TerminalManager({
+      historyDir: "/tmp/kickstart-terminal-manager-test",
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createTab(),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
     });
-    expect(openSpy).not.toHaveBeenCalled();
-    expect(spawnMock).toHaveBeenCalledOnce();
-    expect(writeMock).not.toHaveBeenCalledWith("pnpm dev\r");
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+
+    const session = (manager as any).sessions.get("project-1:tab-1");
+    session.process = null;
+    session.startRequested = true;
+
+    await manager.stopCommand({
+      projectId: "project-1",
+      tabId: "tab-1",
+    });
+
+    expect(session.startRequested).toBe(false);
+  });
+
+  it("clears a pending start when startDesiredCommand is cancelled while waiting for the prompt", async () => {
+    const ptys: Array<{
+      emitData: (data: string) => void;
+      kill: ReturnType<typeof vi.fn>;
+      onDataHandlers: Array<(data: string) => void>;
+      write: ReturnType<typeof vi.fn>;
+    }> = [];
+
+    spawnMock.mockImplementation(() => {
+      const pty = {
+        emitData(data: string) {
+          for (const handler of pty.onDataHandlers) {
+            handler(data);
+          }
+        },
+        kill: vi.fn(),
+        onDataHandlers: [] as Array<(data: string) => void>,
+        onData(handler: (data: string) => void) {
+          pty.onDataHandlers.push(handler);
+        },
+        onExit: vi.fn(),
+        pid: 123 + ptys.length,
+        resize: vi.fn(),
+        write: vi.fn(),
+      };
+      ptys.push(pty);
+      return pty;
+    });
+
+    const manager = new TerminalManager({
+      historyDir: "/tmp/kickstart-terminal-manager-test",
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createTab(),
+      onEvent: vi.fn(),
+      persistTabCwd: vi.fn(),
+    });
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+
+    const session = (manager as any).sessions.get("project-1:tab-1");
+    session.desiredRunState = "running";
+    const startPromise = (manager as any).startDesiredCommand(session, {
+      command: "pnpm dev",
+      cwd: ".",
+      id: "shared:dev",
+      name: "Dev",
+      source: "shared",
+      sourceCommandId: "dev",
+      startMode: "manual",
+      type: "service",
+    }, "/tmp/project");
+
+    await Promise.resolve();
+    expect(session.startRequested).toBe(true);
+
+    session.desiredRunState = "idle";
+    ptys.at(-1)?.emitData("paukraft@mac repo % ");
+    await startPromise;
+
+    expect(session.startRequested).toBe(false);
+    expect(ptys.at(-1)?.write).not.toHaveBeenCalledWith("pnpm dev\r");
+  });
+
+  it("preserves transcript when starting managed commands", async () => {
+    const historyDir = fs.mkdtempSync(path.join(os.tmpdir(), "kickstart-terminal-manager-managed-"));
+    const ptys: Array<{
+      kill: ReturnType<typeof vi.fn>;
+      onDataHandlers: Array<(data: string) => void>;
+      write: ReturnType<typeof vi.fn>;
+    }> = [];
+    const onEvent = vi.fn();
+
+    spawnMock.mockImplementation(() => {
+      const pty = {
+        kill: vi.fn(),
+        onDataHandlers: [] as Array<(data: string) => void>,
+        onData(handler: (data: string) => void) {
+          pty.onDataHandlers.push(handler);
+        },
+        onExit: vi.fn(),
+        pid: 123 + ptys.length,
+        resize: vi.fn(),
+        write: vi.fn(),
+      };
+      ptys.push(pty);
+      if (ptys.length === 2) {
+        queueMicrotask(() => {
+          for (const handler of pty.onDataHandlers) {
+            handler("paukraft@mac repo % ");
+          }
+        });
+      }
+      return pty;
+    });
+
+    const manager = new TerminalManager({
+      historyDir,
+      loadCommand: async () => null,
+      loadProject: async () => ({
+        createdAt: "",
+        id: "project-1",
+        name: "Project",
+        path: "/tmp/project",
+        sortOrder: 0,
+        updatedAt: "",
+      }),
+      loadTab: async () => createTab(),
+      onEvent,
+      persistTabCwd: vi.fn(),
+    });
+
+    await manager.open({
+      cols: 120,
+      projectId: "project-1",
+      rows: 36,
+      tabId: "tab-1",
+    });
+
+    for (const handler of ptys[0]?.onDataHandlers ?? []) {
+      handler("\x1b[?1049h\x1b[?1003hold fullscreen tui frame");
+      handler("paukraft@mac repo % ");
+    }
+
+    const snapshot = await manager.open(
+      {
+        cols: 120,
+        projectId: "project-1",
+        rows: 36,
+        tabId: "tab-1",
+      },
+      {
+        startupCommand: "pnpm dev",
+      },
+    );
+
+    expect(ptys[0]?.kill).toHaveBeenCalled();
+    expect(ptys[1]?.write).toHaveBeenCalledWith("pnpm dev\r");
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.history).toContain("old fullscreen tui frame");
+    fs.rmSync(historyDir, { force: true, recursive: true });
   });
 
   it("restarts a running managed command by stopping first and then running again", async () => {
@@ -375,13 +686,15 @@ describe("TerminalManager managed runs", () => {
         status: "idle",
       }),
     );
-    const runCommandSpy = vi.spyOn(manager, "runCommand").mockResolvedValue(undefined);
+    const runCommandSpy = vi.spyOn(manager, "runCommand").mockResolvedValue(null);
 
     await manager.restartCommand({
       projectId: "project-1",
       tabId: "tab-1",
     });
 
+    await Promise.resolve();
+    await Promise.resolve();
     expect(requestStopSpy).toHaveBeenCalledOnce();
     expect(runCommandSpy).toHaveBeenCalledWith({
       projectId: "project-1",
@@ -656,7 +969,8 @@ describe("TerminalManager managed runs", () => {
 
       expect(writeMock).toHaveBeenLastCalledWith("ls\r");
 
-      await vi.advanceTimersByTimeAsync(80);
+      vi.advanceTimersByTime(80);
+      await Promise.resolve();
 
       for (const handler of onDataHandlers) {
         handler("paukraft@mac repo % ");
@@ -747,7 +1061,7 @@ describe("TerminalManager managed runs", () => {
         handler("]133;C\u0007");
       }
 
-      await vi.runOnlyPendingTimersAsync();
+      vi.runOnlyPendingTimers();
       await Promise.resolve();
       await Promise.resolve();
 
@@ -756,7 +1070,7 @@ describe("TerminalManager managed runs", () => {
         handler("]133;D;0\u0007");
       }
 
-      await vi.runOnlyPendingTimersAsync();
+      vi.runOnlyPendingTimers();
       await Promise.resolve();
       await Promise.resolve();
 
@@ -917,7 +1231,7 @@ describe("TerminalManager managed runs", () => {
         handler("loading shell startup files...");
       }
 
-      await vi.advanceTimersByTimeAsync(200);
+      vi.advanceTimersByTime(200);
       await Promise.resolve();
       await Promise.resolve();
 
@@ -926,7 +1240,7 @@ describe("TerminalManager managed runs", () => {
         status: "booting",
       });
 
-      await vi.advanceTimersByTimeAsync(400);
+      vi.advanceTimersByTime(400);
       await Promise.resolve();
       await Promise.resolve();
 
@@ -994,8 +1308,6 @@ describe("TerminalManager managed runs", () => {
       });
 
       await vi.advanceTimersByTimeAsync(8_000);
-      await Promise.resolve();
-      await Promise.resolve();
 
       expect(await manager.getSession("project-1", "tab-1")).toMatchObject({
         activeProcessCount: 0,

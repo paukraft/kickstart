@@ -6,6 +6,12 @@ declare global {
 
   interface Window {
     desktop: DesktopBridge;
+    __kickstartTerminalDebug?: {
+      rowsText: () => string;
+      scrollToBottom: () => void;
+      scrollToTop: () => void;
+      serialize: () => string;
+    };
   }
 }
 

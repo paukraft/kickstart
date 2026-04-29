@@ -5,7 +5,7 @@ import type {
 
 type ProjectRuntimeSession = Pick<
   TerminalSessionSnapshot,
-  "hasActiveProcess" | "status"
+  "hasActiveProcess" | "operation" | "status"
 >;
 
 export function resolveProjectRuntimeState(args: {
@@ -14,8 +14,10 @@ export function resolveProjectRuntimeState(args: {
 }): ProjectRuntimeState {
   const { sessions, startupCommandCount } = args;
   const runningCommandCount = sessions.filter((session) => session.hasActiveProcess).length;
-  const hasStartingCommand = sessions.some((session) => session.status === "starting");
-  const hasStoppingCommand = sessions.some((session) => session.status === "stopping");
+  const hasStartingCommand = sessions.some(
+    (session) => session.operation === "starting" || session.operation === "restarting",
+  );
+  const hasStoppingCommand = sessions.some((session) => session.operation === "stopping");
 
   if (hasStartingCommand) {
     return "starting";

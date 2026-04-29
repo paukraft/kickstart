@@ -9,6 +9,7 @@ describe("resolveProjectRuntimeState", () => {
         sessions: [
           {
             hasActiveProcess: false,
+            operation: "none",
             status: "booting",
           },
         ],
@@ -23,7 +24,8 @@ describe("resolveProjectRuntimeState", () => {
         sessions: [
           {
             hasActiveProcess: false,
-            status: "starting",
+            operation: "starting",
+            status: "idle",
           },
         ],
         startupCommandCount: 1,

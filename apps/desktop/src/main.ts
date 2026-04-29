@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, shell, type MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import {
@@ -21,6 +21,7 @@ import {
   type CreateProjectInput,
   type DeleteCommandInput,
   type DesktopUpdateActionResult,
+  type DesktopDebugCreateProjectInput,
   type DesktopUpdateMode,
   type DesktopUpdateState,
   type EffectiveCommandId,
@@ -29,6 +30,7 @@ import {
   type ProjectConfigPayload,
   type ProjectRecord,
   type ProjectWithRuntime,
+  type PortPreviewMetadata,
   type RenameShellTabInput,
   type ReorderCommandsInput,
   type ReorderProjectsInGroupInput,
@@ -39,6 +41,7 @@ import {
   type SelectTabInput,
   type ShortcutActionId,
   type TerminalEvent,
+  type TerminalPortUsage,
   type UpdateCommandInput,
   type UpsertCommandInput,
 } from "@kickstart/contracts";
@@ -65,6 +68,7 @@ import {
   type EmbeddedPostHogConfig,
 } from "./lib/posthog-telemetry";
 import { ensureProjectTab } from "./lib/project-tabs";
+import { resolveNetworkUrl } from "./lib/network-url";
 import {
   decomposeResolvedCommands,
   loadProjectCommandPayload,
@@ -75,10 +79,26 @@ import {
 import { resolveProjectRuntimeState } from "./lib/project-runtime";
 import { getShortcutDefinitionsForMenu } from "./lib/shortcuts";
 import { TerminalManager } from "./lib/terminal-manager";
+import { createPortUsageTracker, type PortUsageTracker } from "./lib/terminal-port-usage";
+import { fetchPortPreviewMetadata } from "./lib/port-preview";
 
 function isGeneralSpace(projectId: string) {
   return projectId === GENERAL_SPACE_ID;
 }
+
+const PORT_PREVIEW_CACHE_TTL_MS = 30_000;
+const PORT_PREVIEW_FAILURE_CACHE_TTL_MS = 2_000;
+const DEBUG_AUTOMATION_ENABLED = process.env.KICKSTART_DEBUG_AUTOMATION === "1";
+const DEV_APP_NAME = "Kickstart Dev";
+const STABLE_APP_NAME = "Kickstart";
+
+const portPreviewCache = new Map<
+  string,
+  {
+    expiresAt: number;
+    promise: Promise<PortPreviewMetadata | null>;
+  }
+>();
 
 const started =
   process.platform === "win32"
@@ -89,7 +109,37 @@ if (started) {
   app.quit();
 }
 
-app.setName("Kickstart");
+function hasExplicitUserDataDirArg() {
+  return process.argv.some(
+    (arg) => arg === "--user-data-dir" || arg.startsWith("--user-data-dir="),
+  );
+}
+
+function isSourceTreeDesktopRun() {
+  const candidates = [process.cwd(), app.getAppPath(), __dirname];
+  return candidates.some(
+    (candidate) =>
+      existsSync(path.join(candidate, "vite.main.config.ts")) &&
+      existsSync(path.join(candidate, "src", "main.ts")),
+  );
+}
+
+function resolveAppProfile(): "dev" | "stable" {
+  const explicitProfile = process.env.KICKSTART_DESKTOP_PROFILE?.trim().toLowerCase();
+  if (explicitProfile === "dev" || explicitProfile === "stable") {
+    return explicitProfile;
+  }
+  if (process.env.VITE_DEV_SERVER_URL || isSourceTreeDesktopRun()) {
+    return "dev";
+  }
+  return "stable";
+}
+
+const appProfile = resolveAppProfile();
+app.setName(appProfile === "dev" ? DEV_APP_NAME : STABLE_APP_NAME);
+if (appProfile === "dev" && !hasExplicitUserDataDirArg()) {
+  app.setPath("userData", path.join(app.getPath("appData"), DEV_APP_NAME));
+}
 
 function debounce<T extends (...args: never[]) => void>(fn: T, delay: number): T {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -177,6 +227,7 @@ let store: AppStore | null = null;
 let terminalManager: TerminalManager | null = null;
 let telemetry: DesktopTelemetryClient | null = null;
 let isQuitting = false;
+let portUsageTracker: PortUsageTracker | null = null;
 const configWatchers = new Map<string, FSWatcher>();
 let updatePollTimer: ReturnType<typeof setInterval> | null = null;
 let updateStartupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -191,6 +242,7 @@ const UPDATE_CHECK_CHANNEL = "kickstart:update-check";
 const UPDATE_DOWNLOAD_CHANNEL = "kickstart:update-download";
 const UPDATE_INSTALL_CHANNEL = "kickstart:update-install";
 const SHORTCUT_ACTION_CHANNEL = "kickstart:shortcut-action";
+const PORT_USAGE_CHANGED_CHANNEL = "kickstart:port-usage-changed";
 const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_UPDATE_REPOSITORY = "paukraft/kickstart";
@@ -920,6 +972,34 @@ function getTerminalManager() {
   return terminalManager;
 }
 
+function getPortUsageTracker() {
+  if (!portUsageTracker) {
+    throw new Error("Port usage tracker not initialized.");
+  }
+  return portUsageTracker;
+}
+
+function getCachedPortPreview(url: string) {
+  const now = Date.now();
+  const cached = portPreviewCache.get(url);
+  if (cached && cached.expiresAt > now) {
+    return cached.promise;
+  }
+
+  const promise = fetchPortPreviewMetadata(url).then((metadata) => {
+    const entry = portPreviewCache.get(url);
+    if (entry?.promise === promise) {
+      entry.expiresAt = Date.now() + (metadata ? PORT_PREVIEW_CACHE_TTL_MS : PORT_PREVIEW_FAILURE_CACHE_TTL_MS);
+    }
+    return metadata;
+  });
+  portPreviewCache.set(url, {
+    expiresAt: now + PORT_PREVIEW_CACHE_TTL_MS,
+    promise,
+  });
+  return promise;
+}
+
 function sendConfigChanged(payload: ConfigChangedPayload) {
   if (!mainWindow?.webContents || mainWindow.webContents.isDestroyed()) {
     return;
@@ -932,6 +1012,18 @@ function sendTerminalEvent(event: TerminalEvent) {
     return;
   }
   mainWindow.webContents.send("kickstart:terminal-event", event);
+  if (event.type !== "output" && portUsageTracker) {
+    portUsageTracker.requestRefresh();
+  }
+}
+
+function sendPortUsageChanged(usages: TerminalPortUsage[]) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) {
+      continue;
+    }
+    window.webContents.send(PORT_USAGE_CHANGED_CHANNEL, usages);
+  }
 }
 
 async function getDesktopTelemetryUsageMetrics() {
@@ -1018,7 +1110,7 @@ async function syncProjectTabs(projectId: string, payload: ProjectConfigPayload)
   const runningTabIds = new Set(
     sessions
       .filter((session) =>
-        session.hasActiveProcess || isTerminalSessionTransitioning(session.status),
+        session.hasActiveProcess || isTerminalSessionTransitioning(session.status, session.operation),
       )
       .map((session) => session.tabId),
   );
@@ -1063,10 +1155,20 @@ async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
       const trackedSessions = sessions.filter((session) => trackedTabIdSet.has(session.tabId));
       const startupCommandCount = startupCommandIds.length;
       const runningCommandCount = trackedSessions.filter((session) => session.hasActiveProcess).length;
-      const runtimeState = resolveProjectRuntimeState({
-        sessions: trackedSessions,
-        startupCommandCount,
-      });
+      const projectOperation = await getTerminalManager().getProjectOperation(
+        project.id,
+        trackedTabIds,
+        trackedSessions,
+      );
+      const runtimeState =
+        projectOperation === "stopping"
+          ? "stopping"
+          : projectOperation === "starting" || projectOperation === "restarting"
+            ? "starting"
+            : resolveProjectRuntimeState({
+                sessions: trackedSessions,
+                startupCommandCount,
+              });
       const favicon = await resolveProjectFavicon(project.path);
       return {
         groupId: project.groupId,
@@ -1090,6 +1192,48 @@ async function listProjectsWithRuntime(): Promise<ProjectWithRuntime[]> {
       } satisfies ProjectWithRuntime;
     }),
   );
+}
+
+async function debugGetProjectSnapshot(projectId: string) {
+  const [projects, sessions, tabState] = await Promise.all([
+    listProjectsWithRuntime(),
+    getTerminalManager().getProjectSessions(projectId),
+    syncProjectTabsForProject(projectId),
+  ]);
+  return {
+    activeTabId: tabState.activeTabId,
+    project: projects.find((project) => project.id === projectId) ?? null,
+    sessions,
+    tabs: tabState.tabs,
+  };
+}
+
+async function debugCreateProject(input: DesktopDebugCreateProjectInput) {
+  const projectName = path.basename(input.path);
+  const project = getStore().createProject(input.path, projectName);
+  refreshProjectWatchers();
+  await emitConfigChanged(project.id);
+
+  let tabState = await syncProjectTabsForProject(project.id);
+  if (input.shellTab) {
+    tabState = getStore().createShellTab(project.id);
+  }
+  if (input.select ?? true) {
+    getStore().selectProject(project.id);
+    if (tabState.activeTabId) {
+      getStore().selectTab(project.id, tabState.activeTabId);
+    }
+  }
+
+  const projects = await listProjectsWithRuntime();
+  const projectWithRuntime = projects.find((item) => item.id === project.id);
+  if (!projectWithRuntime) {
+    throw new Error("Debug project was not created.");
+  }
+  return {
+    project: projectWithRuntime,
+    tabState,
+  };
 }
 
 async function emitConfigChanged(projectId: string) {
@@ -1333,12 +1477,19 @@ function createWindow() {
 
   window.on("focus", () => {
     markDesktopAppUsed("window-focus");
+    portUsageTracker?.requestRefresh();
   });
 
   return window;
 }
 
 function registerIpcHandlers() {
+  const requireDebugAutomation = () => {
+    if (!DEBUG_AUTOMATION_ENABLED) {
+      throw new Error("Kickstart debug automation is disabled.");
+    }
+  };
+
   ipcMain.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
   ipcMain.handle(UPDATE_CHECK_CHANNEL, async () => {
     await checkForUpdates("renderer");
@@ -1368,6 +1519,23 @@ function registerIpcHandlers() {
   ipcMain.handle("kickstart:list-projects", async () => listProjectsWithRuntime());
   ipcMain.handle("kickstart:list-available-editors", async () => listAvailableEditorsWithIcons());
   ipcMain.handle("kickstart:get-selected-project-id", async () => getStore().getSelectedProjectId());
+  ipcMain.handle("kickstart:debug-get-snapshot", async () => {
+    requireDebugAutomation();
+    return {
+      isEnabled: true,
+      projects: await listProjectsWithRuntime(),
+      selectedProjectId: getStore().getSelectedProjectId(),
+      userDataPath: app.getPath("userData"),
+    };
+  });
+  ipcMain.handle("kickstart:debug-get-project", async (_event, projectId: string) => {
+    requireDebugAutomation();
+    return debugGetProjectSnapshot(projectId);
+  });
+  ipcMain.handle("kickstart:debug-create-project", async (_event, input: DesktopDebugCreateProjectInput) => {
+    requireDebugAutomation();
+    return debugCreateProject(input);
+  });
 
   ipcMain.handle("kickstart:select-folder", async () => {
     const result = await dialog.showOpenDialog({
@@ -1430,6 +1598,7 @@ function registerIpcHandlers() {
     configWatchers.get(projectId)?.close();
     configWatchers.delete(projectId);
     await getTerminalManager().closeProject(projectId);
+    portUsageTracker?.requestRefresh();
     getStore().deleteProject(projectId);
   });
 
@@ -1476,6 +1645,23 @@ function registerIpcHandlers() {
 
   ipcMain.handle("kickstart:get-project-terminal-sessions", async (_event, projectId: string) => {
     return getTerminalManager().getProjectSessions(projectId);
+  });
+
+  ipcMain.handle("kickstart:get-active-port-usages", async () => {
+    return getPortUsageTracker().refreshNow();
+  });
+
+  ipcMain.handle("kickstart:copy-network-port-url", async (_event, url: string) => {
+    const networkUrl = resolveNetworkUrl(url);
+    if (!networkUrl) {
+      return null;
+    }
+    clipboard.writeText(networkUrl);
+    return networkUrl;
+  });
+
+  ipcMain.handle("kickstart:get-port-preview", async (_event, url: string) => {
+    return getCachedPortPreview(url);
   });
 
   ipcMain.handle("kickstart:create-project-config", async (_event, projectId: string) => {
@@ -1558,6 +1744,7 @@ function registerIpcHandlers() {
       projectId,
       tabId,
     });
+    portUsageTracker?.requestRefresh();
     return getStore().deleteShellTab(projectId, tabId);
   });
 
@@ -1578,6 +1765,9 @@ function registerIpcHandlers() {
   ipcMain.handle("kickstart:terminal-resize", async (_event, input) => {
     return getTerminalManager().resize(input);
   });
+  ipcMain.handle("kickstart:terminal-serialize", async (_event, input) => {
+    getTerminalManager().applySerializedSnapshot(input);
+  });
   ipcMain.handle("kickstart:terminal-run", async (_event, input) => {
     return getTerminalManager().runCommand(input);
   });
@@ -1588,50 +1778,37 @@ function registerIpcHandlers() {
     return getTerminalManager().stopCommand(input);
   });
   ipcMain.handle("kickstart:terminal-close", async (_event, input) => {
-    return getTerminalManager().close(input);
+    await getTerminalManager().close(input);
+    portUsageTracker?.requestRefresh();
   });
 
   ipcMain.handle("kickstart:run-project-start", async (_event, projectId: string) => {
     const startupCommands = await getProjectStartupCommands(projectId);
-
-    await Promise.all(
-      startupCommands.map(async (command) => {
-        const tabId = createCommandTabId(command.id);
-        const session = await getTerminalManager().getSession(projectId, tabId);
-        if (session?.managedRunActive) {
-          return;
-        }
-        await getTerminalManager().runCommand({
-          projectId,
-          tabId,
-        });
-      }),
+    await getTerminalManager().runProjectCommands(
+      startupCommands.map((command) => ({
+        projectId,
+        tabId: createCommandTabId(command.id),
+      })),
     );
   });
 
   ipcMain.handle("kickstart:restart-project-start", async (_event, projectId: string) => {
     const startupCommands = await getProjectStartupCommands(projectId);
-
-    await Promise.all(
-      startupCommands.map((command) =>
-        getTerminalManager().restartCommand({
-          projectId,
-          tabId: createCommandTabId(command.id),
-        }),
-      ),
+    await getTerminalManager().restartProjectCommands(
+      startupCommands.map((command) => ({
+        projectId,
+        tabId: createCommandTabId(command.id),
+      })),
     );
   });
 
   ipcMain.handle("kickstart:stop-project-start", async (_event, projectId: string) => {
     const startupCommands = await getProjectStartupCommands(projectId);
-
-    await Promise.all(
-      startupCommands.map((command) =>
-        getTerminalManager().stopCommand({
-          projectId,
-          tabId: createCommandTabId(command.id),
-        }),
-      ),
+    await getTerminalManager().stopProjectCommands(
+      startupCommands.map((command) => ({
+        projectId,
+        tabId: createCommandTabId(command.id),
+      })),
     );
   });
 }
@@ -1662,7 +1839,13 @@ async function createAppState() {
     persistTabCwd: async (projectId, tabId, cwd) => getStore().updateTabShellCwd(projectId, tabId, cwd),
     onEvent: sendTerminalEvent,
   });
+  portUsageTracker = createPortUsageTracker({
+    hasActiveSessions: () => getTerminalManager().hasActiveSessions(),
+    listPortUsages: () => getTerminalManager().listPortUsages(),
+    onChange: sendPortUsageChanged,
+  });
   await getTerminalManager().migrateCommandHistoryTabIds(getStore().consumeLegacyCommandTabMigrations());
+  await getPortUsageTracker().refreshNow();
 
   for (const project of getStore().listProjects()) {
     await emitConfigChanged(project.id);
@@ -1690,6 +1873,7 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow();
     }
+    portUsageTracker?.requestRefresh();
   });
 });
 
@@ -1702,9 +1886,12 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   isQuitting = true;
   clearUpdatePollTimer();
+  portUsageTracker?.dispose();
+  portUsageTracker = null;
   for (const watcher of configWatchers.values()) {
     watcher.close();
   }
   configWatchers.clear();
+  terminalManager?.flushAll();
   store?.close();
 });

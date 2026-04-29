@@ -3,38 +3,38 @@ import type { TabKind } from "./state";
 export type TerminalSessionStatus =
   | "idle"
   | "booting"
-  | "starting"
   | "running"
-  | "stopping"
   | "stopped"
   | "error";
 
-const TERMINAL_SESSION_TRANSITIONING_STATUSES = new Set<TerminalSessionStatus>([
-  "booting",
+export type TerminalSessionOperation =
+  | "none"
+  | "starting"
+  | "stopping"
+  | "restarting";
+
+const TERMINAL_SESSION_LOADING_OPERATIONS = new Set<TerminalSessionOperation>([
   "starting",
   "stopping",
+  "restarting",
 ]);
 
-const TERMINAL_SESSION_LOADING_STATUSES = new Set<TerminalSessionStatus>([
-  "starting",
-  "stopping",
-]);
-
-const TERMINAL_SESSION_START_PENDING_STATUSES = new Set<TerminalSessionStatus>([
-  "booting",
-  "starting",
-]);
-
-export function isTerminalSessionTransitioning(status: TerminalSessionStatus) {
-  return TERMINAL_SESSION_TRANSITIONING_STATUSES.has(status);
+export function isTerminalSessionTransitioning(
+  status: TerminalSessionStatus,
+  operation: TerminalSessionOperation,
+) {
+  return status === "booting" || TERMINAL_SESSION_LOADING_OPERATIONS.has(operation);
 }
 
-export function isTerminalSessionLoading(status: TerminalSessionStatus) {
-  return TERMINAL_SESSION_LOADING_STATUSES.has(status);
+export function isTerminalSessionLoading(operation: TerminalSessionOperation) {
+  return TERMINAL_SESSION_LOADING_OPERATIONS.has(operation);
 }
 
-export function isTerminalSessionStartPending(status: TerminalSessionStatus) {
-  return TERMINAL_SESSION_START_PENDING_STATUSES.has(status);
+export function isTerminalSessionStartPending(
+  status: TerminalSessionStatus,
+  operation: TerminalSessionOperation,
+) {
+  return status === "booting" || operation === "starting" || operation === "restarting";
 }
 
 export interface TerminalSessionSnapshot {
@@ -47,12 +47,39 @@ export interface TerminalSessionSnapshot {
   kind: TabKind;
   lastCommand: string | null;
   managedRunActive: boolean;
+  operation: TerminalSessionOperation;
+  outputRevision: number;
   pid: number | null;
   projectId: string;
   rows: number;
   status: TerminalSessionStatus;
   tabId: string;
   updatedAt: string;
+}
+
+export interface TerminalPortUsage {
+  id: string;
+  address: string;
+  port: number;
+  protocol: "tcp";
+  pid: number;
+  processName: string;
+  projectId: string;
+  tabId: string;
+  tabTitle: string;
+  tabKind: TabKind;
+  terminalPid: number;
+  cwd: string;
+  lastCommand: string | null;
+  portlessRoutes: TerminalPortlessRoute[];
+  updatedAt: string;
+}
+
+export interface TerminalPortlessRoute {
+  hostname: string;
+  pid: number | null;
+  port: number;
+  url: string;
 }
 
 export interface TerminalOpenInput {
@@ -96,6 +123,13 @@ export interface TerminalCloseInput {
   tabId: string;
 }
 
+export interface TerminalSerializeInput {
+  outputRevision: number;
+  projectId: string;
+  snapshot: string;
+  tabId: string;
+}
+
 export type TerminalEvent =
   | {
       createdAt: string;
@@ -107,6 +141,7 @@ export type TerminalEvent =
   | {
       createdAt: string;
       data: string;
+      outputRevision: number;
       projectId: string;
       tabId: string;
       type: "output";

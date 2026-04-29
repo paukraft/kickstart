@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -6,16 +7,18 @@ import { promisify } from "node:util";
 
 import {
   GENERAL_SPACE_ID,
-  isTerminalSessionStartPending,
   type ProjectRecord,
   type ProjectTabRecord,
   type ResolvedCommandConfig,
+  type TerminalPortUsage,
   type TerminalCloseInput,
   type TerminalEvent,
   type TerminalOpenInput,
   type TerminalRestartInput,
   type TerminalResizeInput,
   type TerminalRunInput,
+  type TerminalSerializeInput,
+  type TerminalSessionOperation,
   type TerminalSessionSnapshot,
   type TerminalStopInput,
   type TerminalWriteInput,
@@ -23,12 +26,23 @@ import {
 import { resolveDefaultShell, resolveProjectCwd } from "@kickstart/core";
 import * as nodePty from "node-pty";
 
+import {
+  buildPortUsageOwnershipContexts,
+  collectDescendantProcessRows,
+  collectTerminalOwnershipPids,
+  joinListenerRecordsToPortUsages,
+  loadPortlessRoutes,
+  parseLsofTcpListenOutput,
+  runScopedLsofForPids,
+  type TerminalPortUsageSessionContext,
+} from "./terminal-port-usage";
 import { createTerminalStartupGate, type TerminalStartupGate } from "./terminal-startup";
 
 interface TerminalSessionState {
   cols: number;
   closing: boolean;
   cwd: string;
+  desiredRunState: "idle" | "running";
   history: string;
   inputBuffer: string;
   kind: ProjectTabRecord["kind"];
@@ -37,12 +51,18 @@ interface TerminalSessionState {
   lastPublishedStateKey: string | null;
   managedRunActive: boolean;
   oscBuffer: string;
+  operation: TerminalSessionOperation;
+  outputRevision: number;
+  pendingStartRequest: boolean;
+  pendingRestart: boolean;
   promptReady: boolean;
   promptResolve: (() => void) | null;
   promptWait: Promise<void> | null;
+  cwdPersistTimer: ReturnType<typeof setTimeout> | null;
   persistTimer: ReturnType<typeof setTimeout> | null;
   process: nodePty.IPty | null;
   projectId: string;
+  reconcilePromise: Promise<void> | null;
   respawnShellOnExit: boolean;
   rows: number;
   shellIntegrationActive: boolean;
@@ -52,7 +72,6 @@ interface TerminalSessionState {
   stopRequested: boolean;
   startupBypassActive: boolean;
   startupGate: TerminalStartupGate | null;
-  status: TerminalSessionSnapshot["status"];
   tabId: string;
   updatedAt: string;
 }
@@ -71,8 +90,21 @@ interface ShellLaunchOptions {
   startupCommand?: string;
 }
 
+interface ProjectOperationState {
+  desiredRunState: "idle" | "running";
+  operation: Exclude<TerminalSessionOperation, "none">;
+  tabIds: Set<string>;
+}
+
+interface StopRequestOptions {
+  keepStoppingOnFailure: boolean;
+  respawnShellOnExit: boolean;
+  shouldContinue?: () => boolean;
+}
+
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 36;
+const REPLAY_BUFFER_MAX_BYTES = 2 * 1024 * 1024;
 const execFile = promisify(execFileCallback);
 const ESCAPE_SEQUENCE_PREFIX = String.fromCharCode(27);
 const OSC_SEQUENCE_PREFIX = `${ESCAPE_SEQUENCE_PREFIX}]`;
@@ -160,6 +192,18 @@ function stripAnsiAndOsc(data: string) {
     .replace(ANSI_SS3_SEQUENCE, "");
 }
 
+function decodeShellIntegrationValue(value: string) {
+  return value.replace(/\\\\|\\x([0-9a-fA-F]{2})/g, (match, hex: string | undefined) => {
+    if (match === "\\\\") {
+      return "\\";
+    }
+    if (!hex) {
+      return match;
+    }
+    return String.fromCharCode(Number.parseInt(hex, 16));
+  });
+}
+
 function chunkLooksLikePrompt(data: string) {
   const visible = stripAnsiAndOsc(data).replace(/\r/g, "\n");
   const lines = visible
@@ -223,21 +267,31 @@ export function resolveShellTabCwd(projectPath: string, shellCwd: string | null)
 
 export class TerminalManager {
   private readonly historyDir: string;
+  private readonly bashIntegrationPath: string | null;
+  private readonly shellHistoryDir: string;
+  private readonly zshIntegrationDir: string | null;
   private readonly loadCommand: TerminalManagerOptions["loadCommand"];
   private readonly loadProject: TerminalManagerOptions["loadProject"];
   private readonly loadTab: TerminalManagerOptions["loadTab"];
   private readonly onEvent: TerminalManagerOptions["onEvent"];
   private readonly persistTabCwd: TerminalManagerOptions["persistTabCwd"];
+  private readonly projectOperations = new Map<string, ProjectOperationState>();
   private readonly sessions = new Map<string, TerminalSessionState>();
 
   constructor(options: TerminalManagerOptions) {
     this.historyDir = options.historyDir;
+    this.shellHistoryDir = path.join(this.historyDir, "..", "shell-history");
     this.loadCommand = options.loadCommand;
     this.loadProject = options.loadProject;
     this.loadTab = options.loadTab;
     this.onEvent = options.onEvent;
     this.persistTabCwd = options.persistTabCwd;
     fs.mkdirSync(this.historyDir, { recursive: true });
+    fs.mkdirSync(this.shellHistoryDir, { recursive: true });
+    this.zshIntegrationDir =
+      process.platform === "win32" ? null : this.buildZshIntegrationDir();
+    this.bashIntegrationPath =
+      process.platform === "win32" ? null : this.buildBashIntegrationPath();
   }
 
   private sessionKey(projectId: string, tabId: string) {
@@ -256,9 +310,7 @@ export class TerminalManager {
   }
 
   private shellHistoryPath(projectId: string, tabId: string) {
-    const shellHistoryDir = path.join(this.historyDir, "..", "shell-history");
-    fs.mkdirSync(shellHistoryDir, { recursive: true });
-    return path.join(shellHistoryDir, `${this.historyFileStem(projectId, tabId)}.history`);
+    return path.join(this.shellHistoryDir, `${this.historyFileStem(projectId, tabId)}.history`);
   }
 
   private async listProcessTable(): Promise<ProcessRow[]> {
@@ -287,37 +339,7 @@ export class TerminalManager {
   }
 
   private listDescendantProcesses(rootPid: number | null, processTable: ProcessRow[]) {
-    if (!rootPid) {
-      return [];
-    }
-
-    const childrenByParent = new Map<number, number[]>();
-    for (const row of processTable) {
-      const siblings = childrenByParent.get(row.ppid) ?? [];
-      siblings.push(row.pid);
-      childrenByParent.set(row.ppid, siblings);
-    }
-
-    const rowsByPid = new Map(processTable.map((row) => [row.pid, row]));
-    const stack = [...(childrenByParent.get(rootPid) ?? [])];
-    const descendants: ProcessRow[] = [];
-
-    while (stack.length > 0) {
-      const pid = stack.pop();
-      if (!pid) {
-        continue;
-      }
-      const row = rowsByPid.get(pid);
-      if (!row) {
-        continue;
-      }
-      if (!row.stat.includes("Z")) {
-        descendants.push(row);
-      }
-      stack.push(...(childrenByParent.get(pid) ?? []));
-    }
-
-    return descendants;
+    return collectDescendantProcessRows(rootPid, processTable);
   }
 
   private countDescendantProcesses(rootPid: number | null, processTable: ProcessRow[]) {
@@ -374,10 +396,7 @@ export class TerminalManager {
 
   private async requestStop(
     session: TerminalSessionState,
-    options: {
-      keepStoppingOnFailure: boolean;
-      respawnShellOnExit: boolean;
-    },
+    options: StopRequestOptions,
   ) {
     const currentSnapshot = await this.startStopRequest(session, options);
     if (!currentSnapshot?.hasActiveProcess) {
@@ -388,17 +407,15 @@ export class TerminalManager {
 
   private async startStopRequest(
     session: TerminalSessionState,
-    options: {
-      keepStoppingOnFailure: boolean;
-      respawnShellOnExit: boolean;
-    },
+    options: StopRequestOptions,
   ) {
     if (!session.process) {
       return null;
     }
 
     const currentSnapshot = await this.snapshot(session);
-    if (!currentSnapshot.hasActiveProcess) {
+    const hasPendingStartWork = session.managedRunActive || session.startRequested;
+    if (!currentSnapshot.hasActiveProcess && !hasPendingStartWork) {
       session.managedRunActive = false;
       session.startRequested = false;
       session.stopRequested = false;
@@ -418,15 +435,17 @@ export class TerminalManager {
 
   private async finishStopRequest(
     session: TerminalSessionState,
-    options: {
-      keepStoppingOnFailure: boolean;
-      respawnShellOnExit: boolean;
-    },
+    options: StopRequestOptions,
   ) {
+    const shouldContinue = () => options.shouldContinue?.() ?? true;
+
     if (!session.process) {
       return this.snapshot(session);
     }
     let snapshot = await this.waitForShellIdle(session, STOP_INTERRUPT_TIMEOUT_MS);
+    if (!shouldContinue()) {
+      return snapshot;
+    }
     if (!snapshot.hasActiveProcess) {
       session.stopRequested = false;
       return this.publishUpdatedSnapshot(session, snapshot);
@@ -437,6 +456,9 @@ export class TerminalManager {
       return this.snapshot(session);
     }
     snapshot = await this.waitForShellIdle(session, STOP_BURST_INTERRUPT_TIMEOUT_MS);
+    if (!shouldContinue()) {
+      return snapshot;
+    }
     if (!snapshot.hasActiveProcess) {
       session.stopRequested = false;
       return this.publishUpdatedSnapshot(session, snapshot);
@@ -447,6 +469,9 @@ export class TerminalManager {
     }
     await this.signalDescendantProcesses(session.process.pid, "SIGTERM");
     snapshot = await this.waitForShellIdle(session, STOP_TERM_TIMEOUT_MS);
+    if (!shouldContinue()) {
+      return snapshot;
+    }
     if (!snapshot.hasActiveProcess) {
       session.stopRequested = false;
       return this.publishUpdatedSnapshot(session, snapshot);
@@ -477,19 +502,13 @@ export class TerminalManager {
             processTable ?? (await this.listProcessTable()),
           );
     const hasActiveProcess = activeProcessCount > 0;
-    const status = session.closing
-      ? "stopping"
-      : !session.process
+    const status = !session.process
       ? "stopped"
-      : session.stopRequested
-        ? "stopping"
-        : isShellBooting(session)
-          ? "booting"
-        : session.startRequested && !hasActiveProcess
-          ? "starting"
+      : isShellBooting(session)
+        ? "booting"
         : hasActiveProcess
           ? "running"
-            : "idle";
+          : "idle";
     return {
       activeProcessCount,
       cols: session.cols,
@@ -500,6 +519,8 @@ export class TerminalManager {
       kind: session.kind,
       lastCommand: session.lastCommand,
       managedRunActive: session.managedRunActive,
+      operation: session.closing ? "stopping" : session.operation,
+      outputRevision: session.outputRevision,
       pid: session.process?.pid ?? null,
       projectId: session.projectId,
       rows: session.rows,
@@ -516,6 +537,7 @@ export class TerminalManager {
       hasActiveProcess: snapshot.hasActiveProcess,
       lastCommand: snapshot.lastCommand,
       managedRunActive: snapshot.managedRunActive,
+      operation: snapshot.operation,
       pid: snapshot.pid,
       status: snapshot.status,
     });
@@ -560,14 +582,334 @@ export class TerminalManager {
     return snapshot;
   }
 
+  private isManagedCommandRunning(
+    session: TerminalSessionState,
+    snapshot: TerminalSessionSnapshot,
+  ) {
+    return (
+      snapshot.hasActiveProcess &&
+      session.lastCommand !== null &&
+      !session.startRequested &&
+      !session.stopRequested
+    );
+  }
+
+  private async startDesiredCommand(
+    session: TerminalSessionState,
+    command: ResolvedCommandConfig,
+    cwd: string,
+  ) {
+    session.lastCommand = null;
+    session.managedRunActive = false;
+    session.startRequested = true;
+    session.stopRequested = false;
+    session.startupBypassActive = false;
+    session.respawnShellOnExit = false;
+    session.cwd = cwd;
+    session.updatedAt = new Date().toISOString();
+
+    session.process?.kill();
+    session.process = null;
+    this.spawnShell(session, {
+      env: command.env,
+    });
+    await this.emitSnapshotEvent(session, "started");
+    await this.waitForPrompt(session);
+
+    if (!session.process || session.desiredRunState !== "running") {
+      session.startRequested = false;
+      session.updatedAt = new Date().toISOString();
+      return;
+    }
+
+    session.operation = session.pendingRestart ? "restarting" : "starting";
+    await this.startManagedRun(session, command.command);
+    await this.emitSnapshotEvent(session);
+  }
+
+  private ensureSessionReconcile(session: TerminalSessionState) {
+    if (session.reconcilePromise) {
+      return session.reconcilePromise;
+    }
+
+    const reconcilePromise = this.reconcileSession(session)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        session.operation = "none";
+        session.pendingRestart = false;
+        session.updatedAt = new Date().toISOString();
+        this.onEvent({
+          createdAt: new Date().toISOString(),
+          message,
+          projectId: session.projectId,
+          tabId: session.tabId,
+          type: "error",
+        });
+        return undefined;
+      })
+      .finally(() => {
+        if (session.reconcilePromise === reconcilePromise) {
+          session.reconcilePromise = null;
+        }
+      });
+
+    session.reconcilePromise = reconcilePromise;
+    return reconcilePromise;
+  }
+
+  private async reconcileSession(session: TerminalSessionState) {
+    while (!session.closing) {
+      const runtime = await this.resolveTabRuntime(session.projectId, session.tabId);
+      const command = runtime.command;
+      const snapshot = await this.snapshot(session);
+
+      if (session.kind !== "command" || !command) {
+        const needsStopWithoutCommand =
+          session.desiredRunState === "idle" &&
+          Boolean(session.process) &&
+          (snapshot.hasActiveProcess ||
+            session.managedRunActive ||
+            session.startRequested ||
+            session.stopRequested);
+
+        if (needsStopWithoutCommand) {
+          session.operation = "stopping";
+          session.updatedAt = new Date().toISOString();
+          await this.emitSnapshotEvent(session);
+          await this.requestStop(session, {
+            keepStoppingOnFailure: false,
+            respawnShellOnExit: session.kind === "command",
+          });
+          continue;
+        }
+
+        session.desiredRunState = "idle";
+        session.operation = "none";
+        session.pendingRestart = false;
+        await this.emitSnapshotEvent(session);
+        return;
+      }
+
+      if (session.desiredRunState === "idle") {
+        const needsStop =
+          Boolean(session.process) &&
+          (snapshot.hasActiveProcess ||
+            session.managedRunActive ||
+            session.startRequested ||
+            session.stopRequested);
+
+        if (!needsStop) {
+          session.operation = "none";
+          session.pendingRestart = false;
+          session.startRequested = false;
+          session.stopRequested = false;
+          session.updatedAt = new Date().toISOString();
+          await this.emitSnapshotEvent(session);
+          return;
+        }
+
+        session.operation = "stopping";
+        session.updatedAt = new Date().toISOString();
+        await this.emitSnapshotEvent(session);
+        await this.requestStop(session, {
+          keepStoppingOnFailure: false,
+          respawnShellOnExit: session.kind === "command",
+        });
+        continue;
+      }
+
+      if (session.pendingRestart && Boolean(session.process)) {
+        const needsRestartStop =
+          snapshot.status === "booting" ||
+          snapshot.hasActiveProcess ||
+          session.managedRunActive ||
+          session.startRequested ||
+          session.stopRequested;
+
+        if (needsRestartStop) {
+          session.operation = "restarting";
+          session.updatedAt = new Date().toISOString();
+          await this.emitSnapshotEvent(session);
+          await this.requestStop(session, {
+            keepStoppingOnFailure: false,
+            respawnShellOnExit: false,
+          });
+          continue;
+        }
+      }
+
+      if (this.isManagedCommandRunning(session, snapshot) && !session.pendingRestart) {
+        session.operation = "none";
+        session.updatedAt = new Date().toISOString();
+        await this.emitSnapshotEvent(session);
+        return;
+      }
+
+      if (!session.pendingStartRequest && !session.pendingRestart) {
+        session.operation = "none";
+        session.updatedAt = new Date().toISOString();
+        await this.emitSnapshotEvent(session);
+        return;
+      }
+
+      if (session.startRequested || session.managedRunActive) {
+        await sleep(STARTUP_IDLE_POLL_INTERVAL_MS);
+        continue;
+      }
+
+      session.operation = session.pendingRestart ? "restarting" : "starting";
+      session.updatedAt = new Date().toISOString();
+      await this.emitSnapshotEvent(session);
+      await this.startDesiredCommand(session, command, runtime.cwd);
+      session.pendingStartRequest = false;
+      session.pendingRestart = false;
+      continue;
+    }
+  }
+
+  private async requestCommandState(
+    input: TerminalRunInput | TerminalStopInput | TerminalRestartInput,
+    nextState: "idle" | "running",
+    options?: {
+      restart?: boolean;
+    },
+  ) {
+    const key = this.sessionKey(input.projectId, input.tabId);
+    let session = this.sessions.get(key);
+    if (!session && nextState === "running") {
+      const runtime = await this.resolveTabRuntime(input.projectId, input.tabId);
+      if (!runtime.command) {
+        return null;
+      }
+      await this.open({
+        cols: DEFAULT_COLS,
+        projectId: input.projectId,
+        rows: DEFAULT_ROWS,
+        tabId: input.tabId,
+      });
+      session = this.sessions.get(key);
+    }
+
+    if (nextState === "running") {
+      const runtime = await this.resolveTabRuntime(input.projectId, input.tabId);
+      if (!runtime.command) {
+        return null;
+      }
+    }
+
+    if (!session) {
+      return null;
+    }
+
+    session.desiredRunState = nextState;
+    session.pendingStartRequest = nextState === "running";
+    session.pendingRestart = Boolean(options?.restart) && nextState === "running";
+    session.operation =
+      nextState === "idle"
+        ? "stopping"
+        : session.pendingRestart
+          ? "restarting"
+          : "starting";
+    session.updatedAt = new Date().toISOString();
+    const snapshot = await this.emitSnapshotEvent(session);
+    if (nextState === "idle") {
+      await this.ensureSessionReconcile(session);
+    } else {
+      void this.ensureSessionReconcile(session);
+    }
+    return snapshot;
+  }
+
   private queuePersist(session: TerminalSessionState) {
     if (session.persistTimer) {
       clearTimeout(session.persistTimer);
     }
     session.persistTimer = setTimeout(() => {
       session.persistTimer = null;
-      fs.writeFileSync(this.historyPath(session.projectId, session.tabId), session.history, "utf8");
+      void this.persistHistoryAsync(session);
     }, 80);
+  }
+
+  private queuePersistCwd(session: TerminalSessionState) {
+    if (session.kind !== "shell") {
+      return;
+    }
+    if (session.cwdPersistTimer) {
+      clearTimeout(session.cwdPersistTimer);
+    }
+    session.cwdPersistTimer = setTimeout(() => {
+      session.cwdPersistTimer = null;
+      void this.persistTabCwd(session.projectId, session.tabId, session.cwd);
+    }, 80);
+  }
+
+  private async persistHistoryAsync(session: TerminalSessionState) {
+    const historyPath = this.historyPath(session.projectId, session.tabId);
+    const payload = session.history;
+    try {
+      await fsPromises.writeFile(historyPath, payload, "utf8");
+    } catch {
+      // ignore transient persist failures; next debounce will retry
+    }
+  }
+
+  private persistHistorySync(session: TerminalSessionState) {
+    const historyPath = this.historyPath(session.projectId, session.tabId);
+    try {
+      fs.writeFileSync(historyPath, session.history, "utf8");
+    } catch {
+      // ignore
+    }
+  }
+
+  private appendReplayBytes(session: TerminalSessionState, data: string) {
+    const next = `${session.history}${data}`;
+    session.history =
+      next.length > REPLAY_BUFFER_MAX_BYTES
+        ? next.slice(next.length - REPLAY_BUFFER_MAX_BYTES)
+        : next;
+    session.outputRevision += 1;
+  }
+
+  applySerializedSnapshot(input: TerminalSerializeInput) {
+    const session = this.sessions.get(this.sessionKey(input.projectId, input.tabId));
+    if (!session) {
+      return;
+    }
+    if (input.outputRevision !== session.outputRevision) {
+      return;
+    }
+    if (
+      session.history.trim().length > 0 &&
+      input.snapshot.length < session.history.length &&
+      (!session.lastCommand || !input.snapshot.includes(session.lastCommand))
+    ) {
+      return;
+    }
+    const snapshot =
+      input.snapshot.length > REPLAY_BUFFER_MAX_BYTES
+        ? input.snapshot.slice(input.snapshot.length - REPLAY_BUFFER_MAX_BYTES)
+        : input.snapshot;
+    session.history = snapshot;
+    session.updatedAt = new Date().toISOString();
+    this.queuePersist(session);
+  }
+
+  flushAll() {
+    for (const session of this.sessions.values()) {
+      if (session.persistTimer) {
+        clearTimeout(session.persistTimer);
+        session.persistTimer = null;
+      }
+      if (session.cwdPersistTimer) {
+        clearTimeout(session.cwdPersistTimer);
+        session.cwdPersistTimer = null;
+        if (session.kind === "shell") {
+          void this.persistTabCwd(session.projectId, session.tabId, session.cwd);
+        }
+      }
+      this.persistHistorySync(session);
+    }
   }
 
   private scheduleStateRefresh(session: TerminalSessionState, delayMs = 75) {
@@ -584,6 +926,16 @@ export class TerminalManager {
   }
 
   private handleOscSequence(session: TerminalSessionState, payload: string) {
+    if (payload.startsWith("633;E;")) {
+      session.shellIntegrationActive = true;
+      const commandLine = payload.slice("633;E;".length).split(";")[0] ?? "";
+      const decodedCommandLine = decodeShellIntegrationValue(commandLine).trim();
+      if (decodedCommandLine) {
+        session.lastCommand = decodedCommandLine;
+      }
+      return;
+    }
+
     if (payload.startsWith("133;C") || payload.startsWith("633;C")) {
       session.startRequested = false;
       session.shellIntegrationActive = true;
@@ -612,14 +964,16 @@ export class TerminalManager {
       session.shellIntegrationActive = true;
       session.cwd = payload.slice("1337;CurrentDir=".length);
       session.updatedAt = new Date().toISOString();
+      this.queuePersistCwd(session);
       this.scheduleStateRefresh(session, 0);
       return;
     }
 
     if (payload.startsWith("633;P;Cwd=")) {
       session.shellIntegrationActive = true;
-      session.cwd = payload.slice("633;P;Cwd=".length);
+      session.cwd = decodeShellIntegrationValue(payload.slice("633;P;Cwd=".length));
       session.updatedAt = new Date().toISOString();
+      this.queuePersistCwd(session);
       this.scheduleStateRefresh(session, 0);
     }
   }
@@ -698,6 +1052,10 @@ export class TerminalManager {
 
     session.cwd = cwd;
     session.updatedAt = new Date().toISOString();
+    if (session.cwdPersistTimer) {
+      clearTimeout(session.cwdPersistTimer);
+      session.cwdPersistTimer = null;
+    }
     await this.persistTabCwd(session.projectId, session.tabId, cwd);
     return true;
   }
@@ -772,7 +1130,7 @@ export class TerminalManager {
     session.process.write(`${command}\r`);
   }
 
-  private ensureZshIntegrationDir() {
+  private buildZshIntegrationDir() {
     const root = path.join(this.historyDir, "..", "shell-integration", "zsh");
     fs.mkdirSync(root, { recursive: true });
 
@@ -783,6 +1141,16 @@ if [[ -n "\${KICKSTART_SHELL_INTEGRATION_LOADED:-}" ]]; then
 fi
 export KICKSTART_SHELL_INTEGRATION_LOADED=1
 
+if [[ -n "\${KICKSTART_HISTFILE:-}" ]]; then
+  HISTFILE="$KICKSTART_HISTFILE"
+fi
+HISTSIZE=50000
+SAVEHIST=50000
+setopt APPEND_HISTORY
+setopt INC_APPEND_HISTORY
+setopt EXTENDED_HISTORY
+setopt HIST_IGNORE_DUPS
+
 autoload -Uz add-zsh-hook
 
 _kickstart_emit() {
@@ -791,13 +1159,34 @@ _kickstart_emit() {
 
 _kickstart_precmd() {
   _kickstart_emit "133;D;$?"
-  _kickstart_emit "1337;CurrentDir=$PWD"
+  _kickstart_emit "633;P;Cwd=$(_kickstart_escape_value "$PWD")"
   _kickstart_emit '133;A'
   _kickstart_emit '133;B'
 }
 
 _kickstart_preexec() {
+  _kickstart_emit "633;E;$(_kickstart_escape_value "$1")"
   _kickstart_emit '133;C'
+}
+
+_kickstart_escape_value() {
+  emulate -L zsh
+  local LC_ALL=C str="$1" i byte value token out=''
+  for (( i = 0; i < \${#str}; ++i )); do
+    byte="\${str:$i:1}"
+    value=$(printf "%d" "'$byte")
+    if (( value < 32 )); then
+      token=$(printf "\\\\x%02x" "'$byte")
+    elif (( value == 92 )); then
+      token="\\\\\\\\"
+    elif (( value == 59 )); then
+      token="\\\\x3b"
+    else
+      token="$byte"
+    fi
+    out+="$token"
+  done
+  print -r -- "$out"
 }
 
 add-zsh-hook precmd _kickstart_precmd
@@ -806,7 +1195,7 @@ add-zsh-hook preexec _kickstart_preexec
     fs.writeFileSync(bootstrapPath, bootstrap, "utf8");
 
     const sourceOrTrue = (fileName: string) =>
-      `if [[ -f "$HOME/${fileName}" ]]; then source "$HOME/${fileName}"; fi`;
+      `if [[ -n "$KICKSTART_USER_ZDOTDIR" && -f "$KICKSTART_USER_ZDOTDIR/${fileName}" ]]; then source "$KICKSTART_USER_ZDOTDIR/${fileName}"; elif [[ -f "$HOME/${fileName}" ]]; then source "$HOME/${fileName}"; fi`;
 
     fs.writeFileSync(
       path.join(root, ".zshenv"),
@@ -837,14 +1226,104 @@ add-zsh-hook preexec _kickstart_preexec
     return root;
   }
 
+  private buildBashIntegrationPath() {
+    const root = path.join(this.historyDir, "..", "shell-integration", "bash");
+    fs.mkdirSync(root, { recursive: true });
+    const bootstrapPath = path.join(root, "kickstart.bash");
+    const bootstrap = `
+if [[ -z "\${KICKSTART_BASH_INTEGRATION_BOOTSTRAPPED:-}" ]]; then
+  export KICKSTART_BASH_INTEGRATION_BOOTSTRAPPED=1
+  _kickstart_loaded_profile=0
+  if [[ -f "$HOME/.bash_profile" ]]; then source "$HOME/.bash_profile"; _kickstart_loaded_profile=1;
+  elif [[ -f "$HOME/.bash_login" ]]; then source "$HOME/.bash_login"; _kickstart_loaded_profile=1;
+  elif [[ -f "$HOME/.profile" ]]; then source "$HOME/.profile"; _kickstart_loaded_profile=1;
+  fi
+  if [[ "$_kickstart_loaded_profile" == "0" && -f "$HOME/.bashrc" ]]; then source "$HOME/.bashrc"; fi
+  unset _kickstart_loaded_profile
+fi
+
+if [[ -n "\${KICKSTART_HISTFILE:-}" ]]; then
+  HISTFILE="$KICKSTART_HISTFILE"
+fi
+HISTSIZE=50000
+HISTFILESIZE=50000
+shopt -s histappend
+
+_kickstart_emit() {
+  printf '\\e]%s\\a' "$1"
+}
+
+_kickstart_escape_value() {
+  local LC_ALL=C str="$1" i byte value token out=''
+  for (( i = 0; i < \${#str}; ++i )); do
+    byte="\${str:$i:1}"
+    value=$(printf "%d" "'$byte")
+    if (( value < 32 )); then
+      printf -v token '\\\\x%02x' "$value"
+    elif (( value == 92 )); then
+      token="\\\\\\\\"
+    elif (( value == 59 )); then
+      token="\\\\x3b"
+    else
+      token="$byte"
+    fi
+    out+="$token"
+  done
+  printf '%s' "$out"
+}
+
+_kickstart_prompt_command() {
+  local exit_code=$?
+  _kickstart_in_prompt=1
+  history -a
+  history -n
+  _kickstart_emit "133;D;$exit_code"
+  _kickstart_emit "633;P;Cwd=$(_kickstart_escape_value "$PWD")"
+  _kickstart_emit "133;A"
+  _kickstart_emit "133;B"
+  _kickstart_in_prompt=0
+  return $exit_code
+}
+
+_kickstart_run_user_prompt_command() {
+  local exit_code=$?
+  _kickstart_in_prompt=1
+  eval "$_kickstart_user_prompt_command"
+  _kickstart_in_prompt=0
+  return $exit_code
+}
+
+_kickstart_preexec() {
+  if [[ "\${_kickstart_in_prompt:-0}" == "1" || "$1" == "_kickstart_prompt_command" || "$1" == "_kickstart_run_user_prompt_command" ]]; then
+    return
+  fi
+  _kickstart_emit "633;E;$(_kickstart_escape_value "$1")"
+  _kickstart_emit "133;C"
+}
+
+if [[ -n "\${PROMPT_COMMAND:-}" ]]; then
+  _kickstart_user_prompt_command="$PROMPT_COMMAND"
+  PROMPT_COMMAND="_kickstart_prompt_command; _kickstart_run_user_prompt_command"
+else
+  unset _kickstart_user_prompt_command
+  PROMPT_COMMAND="_kickstart_prompt_command"
+fi
+trap '_kickstart_preexec "$BASH_COMMAND"' DEBUG
+`.trimStart();
+    fs.writeFileSync(bootstrapPath, bootstrap, "utf8");
+    return bootstrapPath;
+  }
+
   private prepareShellLaunch(
     session: Pick<TerminalSessionState, "projectId" | "tabId">,
     shell: ReturnType<typeof resolveDefaultShell>,
     launchOptions?: ShellLaunchOptions,
   ) {
+    const shellName = path.basename(shell.command);
     const env: Record<string, string | undefined> = {
       ...process.env,
       ...launchOptions?.env,
+      KICKSTART_USER_ZDOTDIR: process.env.ZDOTDIR || os.homedir(),
       SHELL: process.platform === "win32" ? process.env.SHELL : shell.command,
       TERM: process.platform === "win32" ? "xterm-color" : "xterm-256color",
       TERM_PROGRAM: "kickstart",
@@ -853,7 +1332,10 @@ add-zsh-hook preexec _kickstart_preexec
     this.applyShellIntegrationEnv(env, shell.command, session);
 
     return {
-      args: shell.args,
+      args:
+        shellName === "bash" && this.bashIntegrationPath
+          ? ["--rcfile", this.bashIntegrationPath, "-i"]
+          : shell.args,
       env,
     };
   }
@@ -865,15 +1347,19 @@ add-zsh-hook preexec _kickstart_preexec
   ) {
     const shellName = path.basename(shellCommand);
 
-    if (process.platform !== "win32" && shellName === "zsh") {
-      env.ZDOTDIR = this.ensureZshIntegrationDir();
+    if (this.zshIntegrationDir && shellName === "zsh") {
+      env.ZDOTDIR = this.zshIntegrationDir;
     }
 
     switch (shellName) {
       case "bash":
-      case "zsh":
-        env.HISTFILE = this.shellHistoryPath(session.projectId, session.tabId);
+      case "zsh": {
+        const histfile = this.shellHistoryPath(session.projectId, session.tabId);
+        fs.closeSync(fs.openSync(histfile, "a"));
+        env.HISTFILE = histfile;
+        env.KICKSTART_HISTFILE = histfile;
         return;
+      }
       default:
         return;
     }
@@ -944,7 +1430,6 @@ add-zsh-hook preexec _kickstart_preexec
       rows: session.rows,
     });
     session.process = pty;
-    session.status = "running";
     session.updatedAt = new Date().toISOString();
     void this.waitForPrompt(session).then((ready) => {
       if (ready || session.process !== pty) {
@@ -959,15 +1444,16 @@ add-zsh-hook preexec _kickstart_preexec
         return;
       }
       session.startupGate?.signalActivity();
-      session.history = `${session.history}${data}`;
       session.lastOutputAt = Date.now();
       session.updatedAt = new Date().toISOString();
-       this.parseOscSequences(session, data);
+      this.appendReplayBytes(session, data);
+      this.parseOscSequences(session, data);
       this.detectPrompt(session, data);
       this.queuePersist(session);
       this.onEvent({
         createdAt: new Date().toISOString(),
         data,
+        outputRevision: session.outputRevision,
         projectId: session.projectId,
         tabId: session.tabId,
         type: "output",
@@ -997,8 +1483,14 @@ add-zsh-hook preexec _kickstart_preexec
         clearTimeout(session.stateRefreshTimer);
         session.stateRefreshTimer = null;
       }
+      if (session.cwdPersistTimer) {
+        clearTimeout(session.cwdPersistTimer);
+        session.cwdPersistTimer = null;
+        if (session.kind === "shell") {
+          void this.persistTabCwd(session.projectId, session.tabId, session.cwd);
+        }
+      }
       session.stopRequested = false;
-      session.status = "stopped";
       session.updatedAt = new Date().toISOString();
       this.queuePersist(session);
       if (!session.closing) {
@@ -1034,11 +1526,17 @@ add-zsh-hook preexec _kickstart_preexec
     let session = this.sessions.get(key);
     if (!session) {
       const historyPath = this.historyPath(input.projectId, input.tabId);
-      const history = fs.existsSync(historyPath) ? fs.readFileSync(historyPath, "utf8") : "";
+      let history = "";
+      try {
+        history = await fsPromises.readFile(historyPath, "utf8");
+      } catch {
+        history = "";
+      }
       session = {
         cols: input.cols || DEFAULT_COLS,
         closing: false,
         cwd: runtime.cwd,
+        desiredRunState: "idle",
         history,
         inputBuffer: "",
         kind: runtime.tab.kind,
@@ -1047,12 +1545,18 @@ add-zsh-hook preexec _kickstart_preexec
         lastPublishedStateKey: null,
         managedRunActive: false,
         oscBuffer: "",
+        operation: "none",
+        outputRevision: 0,
+        pendingStartRequest: false,
+        pendingRestart: false,
         promptReady: false,
         promptResolve: null,
         promptWait: null,
+        cwdPersistTimer: null,
         persistTimer: null,
         process: null,
         projectId: input.projectId,
+        reconcilePromise: null,
         respawnShellOnExit: false,
         rows: input.rows || DEFAULT_ROWS,
         shellIntegrationActive: false,
@@ -1062,7 +1566,6 @@ add-zsh-hook preexec _kickstart_preexec
         stopRequested: false,
         startupBypassActive: false,
         startupGate: null,
-        status: "booting",
         tabId: input.tabId,
         updatedAt: new Date().toISOString(),
       };
@@ -1070,7 +1573,9 @@ add-zsh-hook preexec _kickstart_preexec
     } else {
       session.closing = false;
       session.cols = input.cols || session.cols;
-      session.cwd = runtime.cwd;
+      if (!session.process) {
+        session.cwd = runtime.cwd;
+      }
       session.kind = runtime.tab.kind;
       session.rows = input.rows || session.rows;
       session.updatedAt = new Date().toISOString();
@@ -1143,51 +1648,66 @@ add-zsh-hook preexec _kickstart_preexec
   }
 
   async runCommand(input: TerminalRunInput) {
-    const runtime = await this.resolveTabRuntime(input.projectId, input.tabId);
-    if (!runtime.command) {
-      return;
-    }
-    const existingSession = this.sessions.get(this.sessionKey(input.projectId, input.tabId));
-    if (existingSession?.process) {
-      const currentSnapshot = await this.waitForShellIdle(existingSession);
-      if (
-        isTerminalSessionStartPending(currentSnapshot.status) ||
-        existingSession.managedRunActive ||
-        (currentSnapshot.hasActiveProcess && existingSession.lastCommand !== null)
-      ) {
-        return currentSnapshot;
-      }
-    }
-    return this.open(
-      {
-        cols: DEFAULT_COLS,
-        projectId: input.projectId,
-        rows: DEFAULT_ROWS,
-        tabId: input.tabId,
-      },
-      {
-        env: runtime.command.env,
-        startupCommand: runtime.command.command,
-      },
-    );
+    return this.requestCommandState(input, "running");
   }
 
   async stopCommand(input: TerminalStopInput) {
     const session = this.sessions.get(this.sessionKey(input.projectId, input.tabId));
-    if (!session?.process) {
-      return;
+    if (!session) {
+      return null;
     }
+
+    session.desiredRunState = "idle";
+    session.pendingStartRequest = false;
+    session.pendingRestart = false;
+    session.startRequested = false;
+    session.operation = "stopping";
+    session.updatedAt = new Date().toISOString();
+    const snapshot = await this.emitSnapshotEvent(session);
+
+    const needsStop =
+      Boolean(session.process) &&
+      (snapshot.hasActiveProcess ||
+        session.managedRunActive ||
+        session.startRequested ||
+        session.stopRequested);
+
+    if (!needsStop) {
+      session.operation = "none";
+      session.updatedAt = new Date().toISOString();
+      return this.emitSnapshotEvent(session);
+    }
+
     const currentSnapshot = await this.startStopRequest(session, {
       keepStoppingOnFailure: false,
       respawnShellOnExit: session.kind === "command",
     });
-    if (!currentSnapshot?.hasActiveProcess) {
-      return;
+    if (!currentSnapshot?.hasActiveProcess && !session.managedRunActive && !session.startRequested) {
+      session.operation = "none";
+      session.updatedAt = new Date().toISOString();
+      return this.emitSnapshotEvent(session);
     }
+
+    const isCurrentStopRequest = () =>
+      session.desiredRunState === "idle" &&
+      session.operation === "stopping" &&
+      !session.pendingStartRequest &&
+      !session.pendingRestart;
+
     void this.finishStopRequest(session, {
       keepStoppingOnFailure: false,
       respawnShellOnExit: session.kind === "command",
+      shouldContinue: isCurrentStopRequest,
+    }).then(async () => {
+      if (!isCurrentStopRequest()) {
+        return;
+      }
+      session.operation = "none";
+      session.updatedAt = new Date().toISOString();
+      await this.emitSnapshotEvent(session);
     });
+
+    return currentSnapshot ?? snapshot;
   }
 
   async restartCommand(input: TerminalRestartInput) {
@@ -1196,20 +1716,112 @@ add-zsh-hook preexec _kickstart_preexec
       return this.runCommand(input);
     }
 
+    session.desiredRunState = "running";
+    session.pendingStartRequest = true;
+    session.pendingRestart = true;
+    session.operation = "restarting";
+    session.updatedAt = new Date().toISOString();
+    await this.emitSnapshotEvent(session);
+
     const currentSnapshot = await this.snapshot(session);
-    if (!currentSnapshot.hasActiveProcess) {
-      return this.runCommand(input);
+    const needsStop =
+      currentSnapshot.hasActiveProcess ||
+      currentSnapshot.status === "booting" ||
+      session.managedRunActive ||
+      session.startRequested ||
+      session.stopRequested;
+
+    if (needsStop) {
+      const stopSnapshot = await this.requestStop(session, {
+        keepStoppingOnFailure: false,
+        respawnShellOnExit: false,
+      });
+      if (stopSnapshot?.hasActiveProcess) {
+        return stopSnapshot;
+      }
     }
 
-    const stopSnapshot = await this.requestStop(session, {
-      keepStoppingOnFailure: false,
-      respawnShellOnExit: session.kind === "command",
-    });
-    if (stopSnapshot?.hasActiveProcess) {
-      return stopSnapshot;
-    }
-
+    session.pendingRestart = false;
     return this.runCommand(input);
+  }
+
+  async runProjectCommands(inputs: readonly TerminalRunInput[]) {
+    this.recordProjectOperation(inputs, "running", "starting");
+    await Promise.all(inputs.map((input) => this.requestCommandState(input, "running")));
+  }
+
+  async stopProjectCommands(inputs: readonly TerminalStopInput[]) {
+    this.recordProjectOperation(inputs, "idle", "stopping");
+    await Promise.all(inputs.map((input) => this.stopCommand(input)));
+  }
+
+  async restartProjectCommands(inputs: readonly TerminalRestartInput[]) {
+    this.recordProjectOperation(inputs, "running", "restarting");
+    await Promise.all(
+      inputs.map((input) => this.requestCommandState(input, "running", { restart: true })),
+    );
+  }
+
+  private recordProjectOperation(
+    inputs: readonly { projectId: string; tabId: string }[],
+    desiredRunState: "idle" | "running",
+    operation: Exclude<TerminalSessionOperation, "none">,
+  ) {
+    const inputsByProject = new Map<string, Set<string>>();
+    for (const input of inputs) {
+      let tabIds = inputsByProject.get(input.projectId);
+      if (!tabIds) {
+        tabIds = new Set<string>();
+        inputsByProject.set(input.projectId, tabIds);
+      }
+      tabIds.add(input.tabId);
+    }
+
+    for (const [projectId, tabIds] of inputsByProject) {
+      this.projectOperations.set(projectId, {
+        desiredRunState,
+        operation,
+        tabIds,
+      });
+    }
+  }
+
+  async getProjectOperation(
+    projectId: string,
+    trackedTabIds: readonly string[],
+    snapshots?: readonly TerminalSessionSnapshot[],
+  ): Promise<TerminalSessionOperation> {
+    const operationState = this.projectOperations.get(projectId);
+    if (!operationState) {
+      return "none";
+    }
+
+    const effectiveTabIds = new Set(
+      trackedTabIds.length > 0 ? trackedTabIds : [...operationState.tabIds],
+    );
+    const sessionSnapshots =
+      snapshots ??
+      (await this.getProjectSessions(projectId)).filter((snapshot) => effectiveTabIds.has(snapshot.tabId));
+
+    const sessionByTabId = new Map(sessionSnapshots.map((snapshot) => [snapshot.tabId, snapshot]));
+    const isTransitionComplete = (snapshot: TerminalSessionSnapshot | undefined) =>
+      !snapshot || (snapshot.operation === "none" && snapshot.status !== "booting");
+
+    const settled = [...effectiveTabIds].every((tabId) => {
+      const snapshot = sessionByTabId.get(tabId);
+      if (operationState.desiredRunState === "running") {
+        return isTransitionComplete(snapshot);
+      }
+
+      return isTransitionComplete(snapshot) && (!snapshot || !snapshot.hasActiveProcess);
+    });
+
+    if (settled) {
+      this.projectOperations.delete(projectId);
+      return "none";
+    }
+
+    return operationState.operation;
   }
 
   async getProjectRunningCommandCount(projectId: string, tabIds: string[]) {
@@ -1237,6 +1849,78 @@ add-zsh-hook preexec _kickstart_preexec
       return null;
     }
     return this.snapshot(session);
+  }
+
+  hasActiveSessions() {
+    for (const session of this.sessions.values()) {
+      if (session.process) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async listPortUsages(): Promise<TerminalPortUsage[]> {
+    if (process.platform === "win32") {
+      return [];
+    }
+
+    const processTable = await this.listProcessTable();
+    const activeSessions = [...this.sessions.values()].filter((session) => session.process?.pid);
+    if (activeSessions.length === 0) {
+      return [];
+    }
+
+    const sessionContexts = (
+      await Promise.all(
+        activeSessions.map(async (session) => {
+          const terminalPid = session.process?.pid ?? null;
+          if (!terminalPid) {
+            return null;
+          }
+
+          const tab = await this.loadTab(session.projectId, session.tabId).catch(() => null);
+          return {
+            cwd: session.cwd,
+            lastCommand: session.lastCommand,
+            projectId: session.projectId,
+            tabId: session.tabId,
+            tabKind: tab?.kind ?? session.kind,
+            tabTitle: tab?.title ?? session.tabId,
+            terminalPid,
+          } satisfies TerminalPortUsageSessionContext;
+        }),
+      )
+    ).filter((context): context is TerminalPortUsageSessionContext => context !== null);
+
+    const ownershipContexts = buildPortUsageOwnershipContexts(sessionContexts, processTable);
+
+    if (ownershipContexts.length === 0) {
+      return [];
+    }
+
+    const pidSet = new Set<number>();
+    for (const context of ownershipContexts) {
+      for (const pid of collectTerminalOwnershipPids(context)) {
+        pidSet.add(pid);
+      }
+    }
+
+    if (pidSet.size === 0) {
+      return [];
+    }
+
+    const stdoutChunks = await runScopedLsofForPids([...pidSet]);
+    if (stdoutChunks.length === 0) {
+      return [];
+    }
+
+    const listenerRecords = stdoutChunks.flatMap((stdout) => parseLsofTcpListenOutput(stdout));
+    if (listenerRecords.length === 0) {
+      return [];
+    }
+
+    return joinListenerRecordsToPortUsages(listenerRecords, ownershipContexts, undefined, loadPortlessRoutes());
   }
 
   private moveHistory(projectId: string, previousTabId: string, nextTabId: string, history: string | null) {
@@ -1327,6 +2011,10 @@ add-zsh-hook preexec _kickstart_preexec
     if (session?.persistTimer) {
       clearTimeout(session.persistTimer);
       session.persistTimer = null;
+    }
+    if (session?.cwdPersistTimer) {
+      clearTimeout(session.cwdPersistTimer);
+      session.cwdPersistTimer = null;
     }
     if (session?.stateRefreshTimer) {
       clearTimeout(session.stateRefreshTimer);

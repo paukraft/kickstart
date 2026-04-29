@@ -3,11 +3,10 @@ import { describe, expect, it } from "vitest";
 import { isTerminalSessionLoading } from "./terminal";
 
 describe("isTerminalSessionLoading", () => {
-  it("treats only starting and stopping as loading", () => {
+  it("treats only non-idle operations as loading", () => {
     expect(isTerminalSessionLoading("starting")).toBe(true);
     expect(isTerminalSessionLoading("stopping")).toBe(true);
-    expect(isTerminalSessionLoading("booting")).toBe(false);
-    expect(isTerminalSessionLoading("running")).toBe(false);
-    expect(isTerminalSessionLoading("idle")).toBe(false);
+    expect(isTerminalSessionLoading("restarting")).toBe(true);
+    expect(isTerminalSessionLoading("none")).toBe(false);
   });
 });

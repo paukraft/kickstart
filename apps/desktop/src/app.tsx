@@ -10,6 +10,7 @@ import {
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
+  createCommandTabId,
   type CommandSource,
   GENERAL_SPACE_ID,
   type DesktopUpdateState,
@@ -29,6 +30,10 @@ import { resolveMergedKickstartConfig } from "@kickstart/core";
 
 import { CommandDialog } from "@/components/app/command-dialog";
 import { MainContent } from "@/components/app/main-content";
+import {
+  PortUsagePills,
+  type PortUsageProjectInfo,
+} from "@/components/app/port-usage-pills";
 import { ProjectCommandMenu } from "@/components/app/project-command-menu";
 import { ProjectDropdown } from "@/components/app/project-dropdown";
 import { ProjectRail, type RailItem } from "@/components/app/project-rail";
@@ -54,6 +59,7 @@ import { commandByTabId, getPreferredCommandTabId } from "@/lib/command-utils";
 import { prefersReducedMotion } from "@/lib/media-preferences";
 import { reorderByIds, type RelativePosition } from "@/lib/reorder";
 import { getShortcutTabIndex } from "@/lib/shortcuts";
+import { resolveProjectRuntimeState } from "@/lib/project-runtime";
 import { installSoundAutoplayUnlock, playSound } from "@/lib/sounds";
 
 const GENERAL_SPACE_NAME = "General";
@@ -63,6 +69,11 @@ type CommandDialogState =
   | { mode: "edit"; commandId: string }
   | { mode: "list" }
   | null;
+
+type PendingProjectRuntimeOverride = {
+  projectId: string;
+  runtimeState: "starting" | "stopping";
+};
 
 // ── Build rail items from projects + groups ───────────────────
 
@@ -205,12 +216,13 @@ const RUNTIME_EVENT_TYPES = new Set<TerminalEvent["type"]>([
 function showsSidebarStartAction(session: TerminalSessionSnapshot | undefined) {
   return (
     !session ||
-    (!session.hasActiveProcess && !isTerminalSessionTransitioning(session.status))
+    (!session.hasActiveProcess &&
+      !isTerminalSessionTransitioning(session.status, session.operation))
   );
 }
 
 export function resolveShellTabCloseAction(session: TerminalSessionSnapshot | undefined) {
-  if (session && isTerminalSessionTransitioning(session.status)) {
+  if (session && isTerminalSessionTransitioning(session.status, session.operation)) {
     return "blocked" as const;
   }
   return session?.hasActiveProcess ? "confirm" as const : "delete" as const;
@@ -284,6 +296,33 @@ export function mergeSelectedProjectRuntime(
     sharedConfigExists: runtime.sharedConfigExists,
     startupCommandCount: runtime.startupCommandCount,
   };
+}
+
+function resolveVisibleProjectRuntimeState(args: {
+  commands: readonly ResolvedCommandConfig[];
+  displayedProject: ProjectWithRuntime | null;
+  displayedProjectId: string | null;
+  projectConfigProjectId: string | null;
+  terminalSessions: Record<string, TerminalSessionSnapshot>;
+}) {
+  if (
+    !args.displayedProject ||
+    !args.displayedProjectId ||
+    args.displayedProjectId === GENERAL_SPACE_ID ||
+    args.projectConfigProjectId !== args.displayedProjectId
+  ) {
+    return args.displayedProject?.runtimeState ?? null;
+  }
+
+  const startupCommands = args.commands.filter(isAutoStartCommand);
+  const trackedSessions = startupCommands
+    .map((command) => args.terminalSessions[createCommandTabId(command.id)])
+    .filter((session): session is TerminalSessionSnapshot => Boolean(session));
+
+  return resolveProjectRuntimeState({
+    sessions: trackedSessions,
+    startupCommandCount: startupCommands.length,
+  });
 }
 
 export function resolveSelectedProjectId(args: {
@@ -478,6 +517,8 @@ export function App() {
   const [dismissedBannerKey, setDismissedBannerKey] = useState<string | null>(
     null,
   );
+  const [pendingProjectRuntimeOverride, setPendingProjectRuntimeOverride] =
+    useState<PendingProjectRuntimeOverride | null>(null);
   const selectedProjectIdRef = useRef<string | null>(selectedProjectId);
   const selectedTabIdRef = useRef<string | null>(selectedTabId);
   const projectListRequestRef = useRef(0);
@@ -525,6 +566,33 @@ export function App() {
       ),
     [commands, displayedProjectId, projectConfig, projectConfigProjectId, projects],
   );
+  const visibleProjectRuntimeState = useMemo(
+    () =>
+      resolveVisibleProjectRuntimeState({
+        commands,
+        displayedProject,
+        displayedProjectId,
+        projectConfigProjectId,
+        terminalSessions,
+      }),
+    [
+      commands,
+      displayedProject,
+      displayedProjectId,
+      projectConfigProjectId,
+      terminalSessions,
+    ],
+  );
+  const displayedProjectRuntimeState =
+    pendingProjectRuntimeOverride?.projectId === displayedProjectId
+      ? pendingProjectRuntimeOverride.runtimeState === "starting"
+        ? visibleProjectRuntimeState === "not-running"
+          ? "starting"
+          : visibleProjectRuntimeState
+        : visibleProjectRuntimeState === "running"
+          ? "stopping"
+          : visibleProjectRuntimeState
+      : visibleProjectRuntimeState;
   const pendingDeleteProject = useMemo(
     () => projects.find((project) => project.id === pendingDeleteProjectId) ?? null,
     [pendingDeleteProjectId, projects],
@@ -555,8 +623,27 @@ export function App() {
       ),
     [railItems],
   );
+  const portUsageProjects = useMemo(() => {
+    const lookup: Record<string, PortUsageProjectInfo> = {
+      [GENERAL_SPACE_ID]: {
+        id: GENERAL_SPACE_ID,
+        name: GENERAL_SPACE_NAME,
+        path: "",
+        iconUrl: null,
+      },
+    };
+    for (const project of projects) {
+      lookup[project.id] = {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        iconUrl: project.iconUrl,
+      };
+    }
+    return lookup;
+  }, [projects]);
   const projectHeaderControl = displayedProject
-    ? displayedProject.runtimeState === "running"
+    ? displayedProjectRuntimeState === "running"
       ? {
           kind: "group" as const,
           restart: {
@@ -571,29 +658,33 @@ export function App() {
             variant: "outline" as const,
           },
         }
-      : displayedProject.runtimeState === "starting"
+      : displayedProjectRuntimeState === "starting"
         ? {
-            kind: "button" as const,
-            button: {
-              disabled: true,
+            kind: "group" as const,
+            restart: {
+              ariaLabel: "Project start in progress",
               icon: <RiLoader4Line className="animate-spin" />,
-              label: "Starting...",
               onClick: () => {},
-              variant: "default" as const,
+            },
+            stop: {
+              icon: <RiStopFill />,
+              label: "Stop",
+              onClick: () => void handleStopProject(),
+              variant: "outline" as const,
             },
           }
-        : displayedProject.runtimeState === "stopping"
+        : displayedProjectRuntimeState === "stopping"
           ? {
               kind: "button" as const,
               button: {
-                disabled: true,
-                icon: <RiLoader4Line className="animate-spin" />,
-                label: "Stopping...",
-                onClick: () => {},
-                variant: "outline" as const,
+                disabled: false,
+                icon: <RiPlayFill />,
+                label: "Start",
+                onClick: () => void handleRunProject(),
+                variant: "default" as const,
               },
             }
-          : displayedProject.runtimeState === "partially-running"
+          : displayedProjectRuntimeState === "partially-running"
             ? {
                 kind: "button" as const,
                 button: {
@@ -952,6 +1043,36 @@ export function App() {
   }, [commands, displayedProjectId, tabs, terminalSessions]);
 
   useEffect(() => {
+    if (!pendingProjectRuntimeOverride) {
+      return;
+    }
+
+    if (pendingProjectRuntimeOverride.projectId !== displayedProjectId) {
+      setPendingProjectRuntimeOverride(null);
+      return;
+    }
+
+    if (
+      pendingProjectRuntimeOverride.runtimeState === "starting" &&
+      visibleProjectRuntimeState !== "not-running"
+    ) {
+      setPendingProjectRuntimeOverride(null);
+      return;
+    }
+
+    if (
+      pendingProjectRuntimeOverride.runtimeState === "stopping" &&
+      visibleProjectRuntimeState !== "running"
+    ) {
+      setPendingProjectRuntimeOverride(null);
+    }
+  }, [
+    displayedProjectId,
+    pendingProjectRuntimeOverride,
+    visibleProjectRuntimeState,
+  ]);
+
+  useEffect(() => {
     if (
       shouldClearPendingProjectSettingsId({
         pendingProjectSettingsId,
@@ -1080,8 +1201,28 @@ export function App() {
     await window.desktop.selectTab({ projectId: selectedProjectId, tabId });
   }
 
+  async function handleNavigateToPortUsage({
+    projectId,
+    tabId,
+  }: {
+    projectId: string;
+    tabId: string;
+  }) {
+    if (selectedProjectIdRef.current === projectId) {
+      setSelectedTabId(tabId);
+      await window.desktop.selectTab({ projectId, tabId });
+      return;
+    }
+    await window.desktop.selectTab({ projectId, tabId });
+    setSelectedProjectId(projectId);
+  }
+
   async function handleRunProject() {
     if (!displayedProject) return;
+    setPendingProjectRuntimeOverride({
+      projectId: displayedProject.id,
+      runtimeState: "starting",
+    });
     await window.desktop.runProjectStart(displayedProject.id);
     await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
@@ -1089,6 +1230,10 @@ export function App() {
 
   async function handleStopProject() {
     if (!displayedProject) return;
+    setPendingProjectRuntimeOverride({
+      projectId: displayedProject.id,
+      runtimeState: "stopping",
+    });
     await window.desktop.stopProjectStart(displayedProject.id);
     await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
@@ -1096,6 +1241,10 @@ export function App() {
 
   async function handleRestartProject() {
     if (!displayedProject) return;
+    setPendingProjectRuntimeOverride({
+      projectId: displayedProject.id,
+      runtimeState: "starting",
+    });
     await window.desktop.restartProjectStart(displayedProject.id);
     await refreshTerminalSessions(displayedProject.id);
     await refreshProjects({ keepSelection: true });
@@ -1613,7 +1762,14 @@ export function App() {
           onComplete={dismissStartupSplash}
         />
 
-        <TitleBar />
+        <TitleBar
+          rightSlot={
+            <PortUsagePills
+              projects={portUsageProjects}
+              onSelect={(payload) => void handleNavigateToPortUsage(payload)}
+            />
+          }
+        />
 
         {updateState &&
         shouldShowUpdateBanner(updateState) &&

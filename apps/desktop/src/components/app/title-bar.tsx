@@ -1,11 +1,17 @@
+import type { ReactNode } from "react";
+
 import appLogo from "@kickstart/assets/src/logo.png";
 
-export function TitleBar() {
+export interface TitleBarProps {
+  rightSlot?: ReactNode;
+}
+
+export function TitleBar({ rightSlot }: TitleBarProps) {
   const isDevelopment = import.meta.env.DEV;
   const title = isDevelopment ? "kickstart (dev)" : "kickstart";
 
   return (
-    <div className="desktop-drag flex h-9 shrink-0 items-center justify-center border-b">
+    <div className="desktop-drag relative flex h-9 shrink-0 items-center justify-center border-b">
       <div className="flex items-center gap-2">
         <img
           src={appLogo}
@@ -17,6 +23,11 @@ export function TitleBar() {
           {title}
         </span>
       </div>
+      {rightSlot ? (
+        <div className="desktop-no-drag absolute inset-y-0 right-0 flex items-center pr-2">
+          {rightSlot}
+        </div>
+      ) : null}
     </div>
   );
 }

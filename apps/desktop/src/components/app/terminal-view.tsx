@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal, type ITheme } from "@xterm/xterm";
 
-import { isTerminalSessionStartPending } from "@kickstart/contracts";
-import type {
-  ProjectTabRecord,
-  TerminalEvent,
-  TerminalSessionSnapshot,
-} from "@kickstart/contracts";
+import type { ProjectTabRecord, TerminalEvent, TerminalSessionSnapshot } from "@kickstart/contracts";
 
 import { getPrefersDarkMode, useDarkMode } from "@/lib/media-preferences";
 import { createTerminalReplayGuard } from "@/lib/terminal-replay-guard";
@@ -66,16 +62,28 @@ function shellEscapePath(path: string) {
   return `'${path.replaceAll("'", "'\\''")}'`;
 }
 
-type SnapshotTerminalEvent = Extract<TerminalEvent, { snapshot: TerminalSessionSnapshot }>;
+const resetReplayOnlyTerminalModes =
+  "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?25h\x1b[0m";
+const enterAlternateScreenPattern = new RegExp(String.raw`\u001b\[\?(?:47|1047|1049)h`, "g");
+const leaveAlternateScreenPattern = new RegExp(String.raw`\u001b\[\?(?:47|1047|1049)l`, "g");
 
-const ANSI_ESCAPE_SEQUENCE_PATTERN = String.raw`\x1b`;
-const TRANSIENT_ZSH_PROMPT_PLACEHOLDER_PATTERN = new RegExp(
-  String.raw`${ANSI_ESCAPE_SEQUENCE_PATTERN}\[1m${ANSI_ESCAPE_SEQUENCE_PATTERN}\[7m%${ANSI_ESCAPE_SEQUENCE_PATTERN}\[27m${ANSI_ESCAPE_SEQUENCE_PATTERN}\[1m${ANSI_ESCAPE_SEQUENCE_PATTERN}\[0m[^\S\r\n]*\r[^\S\r\n]*\r`,
-  "g",
-);
+function endsInAlternateScreen(history: string) {
+  let lastEnter = -1;
+  let lastLeave = -1;
+  for (const match of history.matchAll(enterAlternateScreenPattern)) {
+    lastEnter = match.index;
+  }
+  for (const match of history.matchAll(leaveAlternateScreenPattern)) {
+    lastLeave = match.index;
+  }
+  return lastEnter > lastLeave;
+}
 
-export function normalizeTerminalReplayHistory(history: string) {
-  return history.replaceAll(TRANSIENT_ZSH_PROMPT_PLACEHOLDER_PATTERN, "");
+export function terminalReplayData(history: string) {
+  const leaveAlternateScreen = endsInAlternateScreen(history)
+    ? "\x1b[?47l\x1b[?1047l\x1b[?1049l"
+    : "";
+  return `\x1bc${history}${leaveAlternateScreen}${resetReplayOnlyTerminalModes}`;
 }
 
 export function shouldReplaceRenderedTerminalHistory(args: {
@@ -94,27 +102,6 @@ export function shouldReplaceRenderedTerminalHistory(args: {
     return false;
   }
   return true;
-}
-
-export function shouldReplaySnapshotForTerminalEvent(
-  event: TerminalEvent,
-): event is SnapshotTerminalEvent {
-  return event.type === "started" || event.type === "updated" || event.type === "cleared";
-}
-
-export function shouldTruncateTerminalHistory(type: SnapshotTerminalEvent["type"]) {
-  return type === "cleared";
-}
-
-export function shouldForceReplaySettledTerminalSnapshot(args: {
-  nextStatus: TerminalSessionSnapshot["status"];
-  previousStatus: TerminalSessionSnapshot["status"] | null;
-}) {
-  return (
-    args.previousStatus !== null &&
-    isTerminalSessionStartPending(args.previousStatus) &&
-    !isTerminalSessionStartPending(args.nextStatus)
-  );
 }
 
 function parseUriList(uriList: string) {
@@ -151,7 +138,6 @@ function getDroppedPaths(dataTransfer: DataTransfer) {
 
 export function TerminalView({
   projectId,
-  session,
   tab,
 }: {
   projectId: string;
@@ -161,15 +147,13 @@ export function TerminalView({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const serializeAddonRef = useRef<SerializeAddon | null>(null);
   const renderedHistoryRef = useRef<string | null>(null);
-  const latestSessionHistoryRef = useRef<string | null>(null);
-  const latestSessionStatusRef = useRef<TerminalSessionSnapshot["status"] | null>(session?.status ?? null);
+  const renderedOutputRevisionRef = useRef(0);
   const dragDepthRef = useRef(0);
+  const lastReportedSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const isDark = useDarkMode();
   const [exitHint, setExitHint] = useState<string | null>(null);
-  const sessionHistory = session?.history ?? null;
-  latestSessionHistoryRef.current = sessionHistory;
-  latestSessionStatusRef.current = session?.status ?? null;
 
   // Update xterm theme when OS preference changes
   useEffect(() => {
@@ -181,6 +165,7 @@ export function TerminalView({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    const hostElement = host;
     const initialTheme = getPrefersDarkMode() ? darkTheme : lightTheme;
 
     const terminal = new Terminal({
@@ -189,38 +174,140 @@ export function TerminalView({
       cursorBlink: true,
       fontFamily: '"JetBrains Mono", monospace',
       fontSize: 13,
+      scrollback: 10_000,
       theme: initialTheme,
     });
     const fitAddon = new FitAddon();
+    const serializeAddon = new SerializeAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(host);
-    fitAddon.fit();
+    terminal.loadAddon(serializeAddon);
+    terminal.open(hostElement);
     const replayGuard = createTerminalReplayGuard();
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    serializeAddonRef.current = serializeAddon;
     renderedHistoryRef.current = null;
+    renderedOutputRevisionRef.current = 0;
+    lastReportedSizeRef.current = null;
+    const terminalDebugHandle = {
+      rowsText: () => hostElement.querySelector(".xterm-rows")?.textContent ?? "",
+      scrollToBottom: () => terminal.scrollToBottom(),
+      scrollToTop: () => terminal.scrollToTop(),
+      serialize: () => serializeAddon.serialize(),
+    };
+    window.__kickstartTerminalDebug = terminalDebugHandle;
 
-    function renderSnapshot(history: string, options?: { allowTruncate?: boolean; forceReplay?: boolean }) {
-      const nextRenderedHistory = normalizeTerminalReplayHistory(history);
+    let fitFrame: number | null = null;
+    let serializeTimer: number | null = null;
+    const fitTimeouts = new Set<number>();
+
+    function persistSerializedSnapshot() {
+      if (serializeTimer !== null) {
+        clearTimeout(serializeTimer);
+        serializeTimer = null;
+      }
+      const activeSerializeAddon = serializeAddonRef.current;
+      if (!activeSerializeAddon) {
+        return;
+      }
+      const snapshot = activeSerializeAddon.serialize();
+      renderedHistoryRef.current = snapshot;
+      void window.desktop.terminalSerialize({
+        outputRevision: renderedOutputRevisionRef.current,
+        projectId,
+        snapshot,
+        tabId: tab.id,
+      });
+    }
+
+    function schedulePersistSerializedSnapshot() {
+      if (serializeTimer !== null) {
+        clearTimeout(serializeTimer);
+      }
+      serializeTimer = window.setTimeout(() => {
+        serializeTimer = null;
+        persistSerializedSnapshot();
+      }, 120);
+    }
+
+    function fitAndResize() {
+      const activeTerminal = terminalRef.current;
+      const activeFitAddon = fitAddonRef.current;
+      if (!activeTerminal || !activeFitAddon) {
+        return;
+      }
+
+      if (hostElement.clientWidth === 0 || hostElement.clientHeight === 0) {
+        return;
+      }
+
+      activeFitAddon.fit();
+      const nextSize = { cols: activeTerminal.cols, rows: activeTerminal.rows };
+      const lastSize = lastReportedSizeRef.current;
+      if (lastSize?.cols === nextSize.cols && lastSize?.rows === nextSize.rows) {
+        return;
+      }
+
+      lastReportedSizeRef.current = nextSize;
+      void window.desktop.terminalResize({
+        cols: nextSize.cols,
+        projectId,
+        rows: nextSize.rows,
+        tabId: tab.id,
+      });
+    }
+
+    function scheduleFitAndResize() {
+      if (fitFrame !== null) {
+        cancelAnimationFrame(fitFrame);
+      }
+      fitFrame = window.requestAnimationFrame(() => {
+        fitFrame = null;
+        fitAndResize();
+      });
+    }
+
+    function scheduleDelayedFitAndResize(delayMs: number) {
+      const timeoutId = window.setTimeout(() => {
+        fitTimeouts.delete(timeoutId);
+        scheduleFitAndResize();
+      }, delayMs);
+      fitTimeouts.add(timeoutId);
+    }
+
+    scheduleFitAndResize();
+    scheduleDelayedFitAndResize(0);
+    scheduleDelayedFitAndResize(50);
+    scheduleDelayedFitAndResize(150);
+    scheduleDelayedFitAndResize(300);
+    const fontsReady = document.fonts?.ready;
+    if (fontsReady) {
+      void fontsReady.then(() => {
+        scheduleFitAndResize();
+        scheduleDelayedFitAndResize(100);
+      });
+    }
+
+    function renderSnapshot(
+      history: string,
+      outputRevision: number,
+      options?: { allowTruncate?: boolean; forceReplay?: boolean },
+    ) {
       if (
         !options?.forceReplay &&
         !shouldReplaceRenderedTerminalHistory({
           allowTruncate: options?.allowTruncate,
-          currentHistory:
-            renderedHistoryRef.current === null
-              ? null
-              : normalizeTerminalReplayHistory(renderedHistoryRef.current),
-          nextHistory: nextRenderedHistory,
+          currentHistory: renderedHistoryRef.current,
+          nextHistory: history,
         })
       ) {
         return;
       }
-      replayGuard.replay(terminal, `\u001bc${nextRenderedHistory}`);
+      replayGuard.replay(terminal, terminalReplayData(history));
       renderedHistoryRef.current = history;
-    }
-    if (latestSessionHistoryRef.current !== null) {
-      renderSnapshot(latestSessionHistoryRef.current, { allowTruncate: false });
+      renderedOutputRevisionRef.current = outputRevision;
+      scheduleFitAndResize();
     }
 
     const writeDisposable = terminal.onData((data) => {
@@ -232,18 +319,9 @@ export function TerminalView({
     });
 
     const resizeObserver = new ResizeObserver(() => {
-      const activeTerminal = terminalRef.current;
-      const activeFitAddon = fitAddonRef.current;
-      if (!activeTerminal || !activeFitAddon) return;
-      activeFitAddon.fit();
-      void window.desktop.terminalResize({
-        cols: activeTerminal.cols,
-        projectId,
-        rows: activeTerminal.rows,
-        tabId: tab.id,
-      });
+      scheduleFitAndResize();
     });
-    resizeObserver.observe(host);
+    resizeObserver.observe(hostElement);
 
     function writeToTerminal(data: string) {
       if (!data) {
@@ -311,10 +389,10 @@ export function TerminalView({
       }
     }
 
-    host.addEventListener("dragenter", handleDragEnter);
-    host.addEventListener("dragover", handleDragOver);
-    host.addEventListener("dragleave", handleDragLeave);
-    host.addEventListener("drop", handleDrop);
+    hostElement.addEventListener("dragenter", handleDragEnter);
+    hostElement.addEventListener("dragover", handleDragOver);
+    hostElement.addEventListener("dragleave", handleDragLeave);
+    hostElement.addEventListener("drop", handleDrop);
 
     const handleEvent = (event: TerminalEvent) => {
       if (event.projectId !== projectId || event.tabId !== tab.id) return;
@@ -322,23 +400,18 @@ export function TerminalView({
       if (!activeTerminal) return;
       if (event.type === "output") {
         setExitHint(null);
-        activeTerminal.write(event.data);
-        renderedHistoryRef.current = `${renderedHistoryRef.current ?? ""}${event.data}`;
+        activeTerminal.write(event.data, () => {
+          renderedHistoryRef.current = serializeAddon.serialize();
+          renderedOutputRevisionRef.current = event.outputRevision;
+          schedulePersistSerializedSnapshot();
+        });
         return;
       }
-      if (shouldReplaySnapshotForTerminalEvent(event)) {
+      if (event.type === "started" || event.type === "cleared") {
         setExitHint(null);
-        const forceReplay =
-          event.type === "updated" &&
-          shouldForceReplaySettledTerminalSnapshot({
-            nextStatus: event.snapshot.status,
-            previousStatus: latestSessionStatusRef.current,
-          });
-        renderSnapshot(event.snapshot.history, {
-          allowTruncate: shouldTruncateTerminalHistory(event.type),
-          forceReplay,
+        renderSnapshot(event.snapshot.history, event.snapshot.outputRevision, {
+          allowTruncate: event.type === "cleared",
         });
-        latestSessionStatusRef.current = event.snapshot.status;
         return;
       }
       if (event.type === "error") {
@@ -369,8 +442,18 @@ export function TerminalView({
           terminal.write(systemMessage("Terminal tab is no longer available."));
           return;
         }
-        renderSnapshot(snapshot.history, { allowTruncate: false });
-        latestSessionStatusRef.current = snapshot.status;
+        renderSnapshot(snapshot.history, snapshot.outputRevision, {
+          allowTruncate: false,
+          forceReplay: true,
+        });
+        const restoreReplayTimeoutId = window.setTimeout(() => {
+          fitTimeouts.delete(restoreReplayTimeoutId);
+          renderSnapshot(snapshot.history, snapshot.outputRevision, {
+            allowTruncate: false,
+            forceReplay: true,
+          });
+        }, 250);
+        fitTimeouts.add(restoreReplayTimeoutId);
         terminal.focus();
       })
       .catch((error) => {
@@ -378,15 +461,27 @@ export function TerminalView({
       });
 
     return () => {
+      if (fitFrame !== null) {
+        cancelAnimationFrame(fitFrame);
+      }
+      persistSerializedSnapshot();
+      for (const timeoutId of fitTimeouts) {
+        clearTimeout(timeoutId);
+      }
+      fitTimeouts.clear();
       unsubscribeEvents();
       resizeObserver.disconnect();
       writeDisposable.dispose();
-      host.removeEventListener("dragenter", handleDragEnter);
-      host.removeEventListener("dragover", handleDragOver);
-      host.removeEventListener("dragleave", handleDragLeave);
-      host.removeEventListener("drop", handleDrop);
+      hostElement.removeEventListener("dragenter", handleDragEnter);
+      hostElement.removeEventListener("dragover", handleDragOver);
+      hostElement.removeEventListener("dragleave", handleDragLeave);
+      hostElement.removeEventListener("drop", handleDrop);
       terminalRef.current = null;
       fitAddonRef.current = null;
+      serializeAddonRef.current = null;
+      if (window.__kickstartTerminalDebug === terminalDebugHandle) {
+        delete window.__kickstartTerminalDebug;
+      }
       terminal.dispose();
     };
   }, [projectId, tab.id, tab.kind]);

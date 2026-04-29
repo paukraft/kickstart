@@ -6,15 +6,20 @@ import type {
   ShortcutActionId,
   DesktopUpdateState,
   TerminalEvent,
+  TerminalPortUsage,
 } from "@kickstart/contracts";
 
 const desktopBridge: DesktopBridge = {
   checkForUpdates: () => ipcRenderer.invoke("kickstart:update-check"),
+  copyNetworkPortUrl: (url) => ipcRenderer.invoke("kickstart:copy-network-port-url", url),
   createCommand: (input) => ipcRenderer.invoke("kickstart:create-command", input),
   createGroupFromProjects: (input) => ipcRenderer.invoke("kickstart:create-group-from-projects", input),
   createProject: (input) => ipcRenderer.invoke("kickstart:create-project", input),
   createProjectConfig: (projectId) => ipcRenderer.invoke("kickstart:create-project-config", projectId),
   createShellTab: (input) => ipcRenderer.invoke("kickstart:create-shell-tab", input),
+  debugCreateProject: (input) => ipcRenderer.invoke("kickstart:debug-create-project", input),
+  debugGetProject: (projectId) => ipcRenderer.invoke("kickstart:debug-get-project", projectId),
+  debugGetSnapshot: () => ipcRenderer.invoke("kickstart:debug-get-snapshot"),
   deleteCommand: (input) => ipcRenderer.invoke("kickstart:delete-command", input),
   deleteProject: (projectId) => ipcRenderer.invoke("kickstart:delete-project", projectId),
   deleteShellTab: (projectId, tabId) => ipcRenderer.invoke("kickstart:delete-shell-tab", projectId, tabId),
@@ -24,6 +29,8 @@ const desktopBridge: DesktopBridge = {
   getProjectConfig: (projectId) => ipcRenderer.invoke("kickstart:get-project-config", projectId),
   getProjectTerminalSessions: (projectId) =>
     ipcRenderer.invoke("kickstart:get-project-terminal-sessions", projectId),
+  getActivePortUsages: () => ipcRenderer.invoke("kickstart:get-active-port-usages"),
+  getPortPreview: (url) => ipcRenderer.invoke("kickstart:get-port-preview", url),
   getProjectTabs: (projectId) => ipcRenderer.invoke("kickstart:get-project-tabs", projectId),
   getUpdateState: () => ipcRenderer.invoke("kickstart:get-update-state"),
   installUpdate: () => ipcRenderer.invoke("kickstart:update-install"),
@@ -53,6 +60,7 @@ const desktopBridge: DesktopBridge = {
   toggleGroupCollapsed: (groupId) => ipcRenderer.invoke("kickstart:toggle-group-collapsed", groupId),
   terminalClose: (input) => ipcRenderer.invoke("kickstart:terminal-close", input),
   terminalResize: (input) => ipcRenderer.invoke("kickstart:terminal-resize", input),
+  terminalSerialize: (input) => ipcRenderer.invoke("kickstart:terminal-serialize", input),
   terminalWrite: (input) => ipcRenderer.invoke("kickstart:terminal-write", input),
   updateCommand: (input) => ipcRenderer.invoke("kickstart:update-command", input),
   onUpdateState: (listener) => {
@@ -89,6 +97,15 @@ const desktopBridge: DesktopBridge = {
     ipcRenderer.on("kickstart:terminal-event", wrapped);
     return () => {
       ipcRenderer.off("kickstart:terminal-event", wrapped);
+    };
+  },
+  watchPortUsage: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: TerminalPortUsage[]) => {
+      listener(payload);
+    };
+    ipcRenderer.on("kickstart:port-usage-changed", wrapped);
+    return () => {
+      ipcRenderer.off("kickstart:port-usage-changed", wrapped);
     };
   },
 };

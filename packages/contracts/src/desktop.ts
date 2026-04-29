@@ -13,10 +13,12 @@ import type {
 import type {
   TerminalCloseInput,
   TerminalEvent,
+  TerminalPortUsage,
   TerminalOpenInput,
   TerminalRestartInput,
   TerminalResizeInput,
   TerminalRunInput,
+  TerminalSerializeInput,
   TerminalSessionSnapshot,
   TerminalStopInput,
   TerminalWriteInput,
@@ -275,6 +277,31 @@ export interface DesktopUpdateActionResult {
   state: DesktopUpdateState;
 }
 
+export interface DesktopDebugProjectSnapshot {
+  activeTabId: string | null;
+  project: ProjectWithRuntime | null;
+  sessions: TerminalSessionSnapshot[];
+  tabs: ProjectTabRecord[];
+}
+
+export interface DesktopDebugSnapshot {
+  isEnabled: boolean;
+  projects: ProjectWithRuntime[];
+  selectedProjectId: string | null;
+  userDataPath: string;
+}
+
+export interface DesktopDebugCreateProjectInput {
+  path: string;
+  select?: boolean;
+  shellTab?: boolean;
+}
+
+export interface DesktopDebugCreateProjectResult {
+  project: ProjectWithRuntime;
+  tabState: ProjectTabState;
+}
+
 export type ShortcutActionId =
   | "toggle-project-command-menu"
   | "new-shell-tab"
@@ -390,13 +417,92 @@ export interface ConfigChangedPayload {
   tabs: ProjectTabRecord[];
 }
 
+export const PORT_PREVIEW_FRAMEWORKS = [
+  {
+    commandKeywords: ["next"],
+    headerKeywords: ["next"],
+    htmlMarkers: ["__next_data__", "/_next/"],
+    id: "next",
+    label: "Next.js",
+  },
+  {
+    commandKeywords: ["vite"],
+    headerKeywords: [],
+    htmlMarkers: ["/@vite/client", "vite/client"],
+    id: "vite",
+    label: "Vite",
+  },
+  {
+    commandKeywords: ["astro"],
+    headerKeywords: [],
+    htmlMarkers: ["/_astro/", "astro-island"],
+    id: "astro",
+    label: "Astro",
+  },
+  {
+    commandKeywords: ["remix"],
+    headerKeywords: [],
+    htmlMarkers: ["__remixcontext", "/build/_assets/"],
+    id: "remix",
+    label: "Remix",
+  },
+  {
+    commandKeywords: ["storybook"],
+    headerKeywords: [],
+    htmlMarkers: ["storybook"],
+    id: "storybook",
+    label: "Storybook",
+  },
+  {
+    commandKeywords: ["sveltekit"],
+    headerKeywords: [],
+    htmlMarkers: ["__sveltekit"],
+    id: "sveltekit",
+    label: "SvelteKit",
+  },
+  {
+    commandKeywords: ["svelte"],
+    headerKeywords: [],
+    htmlMarkers: [],
+    id: "svelte",
+    label: "Svelte",
+  },
+  {
+    commandKeywords: ["nuxt"],
+    headerKeywords: [],
+    htmlMarkers: ["__nuxt"],
+    id: "nuxt",
+    label: "Nuxt",
+  },
+] as const;
+
+export type PortPreviewFrameworkId = (typeof PORT_PREVIEW_FRAMEWORKS)[number]["id"];
+
+export function labelForPortPreviewFramework(id: PortPreviewFrameworkId) {
+  return PORT_PREVIEW_FRAMEWORKS.find((framework) => framework.id === id)?.label ?? id;
+}
+
+export interface PortPreviewMetadata {
+  description: string | null;
+  frameworkId: PortPreviewFrameworkId | null;
+  siteName: string | null;
+  title: string | null;
+  url: string;
+}
+
 export interface DesktopBridge {
   checkForUpdates: () => Promise<DesktopUpdateActionResult>;
+  copyNetworkPortUrl: (url: string) => Promise<string | null>;
   createCommand: (input: UpsertCommandInput) => Promise<ProjectConfigPayload>;
   createGroupFromProjects: (input: CreateGroupFromProjectsInput) => Promise<void>;
   createProject: (input: CreateProjectInput) => Promise<ProjectWithRuntime>;
   createProjectConfig: (projectId: string) => Promise<ProjectConfigPayload>;
   createShellTab: (input: NewShellTabInput) => Promise<ProjectTabState>;
+  debugCreateProject: (
+    input: DesktopDebugCreateProjectInput,
+  ) => Promise<DesktopDebugCreateProjectResult>;
+  debugGetProject: (projectId: string) => Promise<DesktopDebugProjectSnapshot>;
+  debugGetSnapshot: () => Promise<DesktopDebugSnapshot>;
   deleteCommand: (input: DeleteCommandInput) => Promise<ProjectConfigPayload>;
   deleteProject: (projectId: string) => Promise<void>;
   deleteShellTab: (projectId: string, tabId: string) => Promise<ProjectTabState>;
@@ -404,6 +510,8 @@ export interface DesktopBridge {
   getUpdateState: () => Promise<DesktopUpdateState>;
   getProjectConfig: (projectId: string) => Promise<ProjectConfigPayload>;
   getProjectTerminalSessions: (projectId: string) => Promise<TerminalSessionSnapshot[]>;
+  getActivePortUsages: () => Promise<TerminalPortUsage[]>;
+  getPortPreview: (url: string) => Promise<PortPreviewMetadata | null>;
   getProjectTabs: (projectId: string) => Promise<ProjectTabState>;
   listAvailableEditors: () => Promise<EditorOption[]>;
   listGroups: () => Promise<ProjectGroupRecord[]>;
@@ -437,6 +545,7 @@ export interface DesktopBridge {
   toggleGroupCollapsed: (groupId: string) => Promise<void>;
   terminalClose: (input: TerminalCloseInput) => Promise<void>;
   terminalResize: (input: TerminalResizeInput) => Promise<void>;
+  terminalSerialize: (input: TerminalSerializeInput) => Promise<void>;
   terminalWrite: (input: TerminalWriteInput) => Promise<void>;
   updateCommand: (input: UpdateCommandInput) => Promise<ProjectConfigPayload>;
   watchShortcutActions: (
@@ -447,5 +556,8 @@ export interface DesktopBridge {
   ) => () => void;
   watchTerminalEvents: (
     listener: (event: TerminalEvent) => void,
+  ) => () => void;
+  watchPortUsage: (
+    listener: (usages: TerminalPortUsage[]) => void,
   ) => () => void;
 }

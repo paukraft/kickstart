@@ -89,9 +89,11 @@ function ActionItem({
     id: tabId,
     index,
   });
-  const isTransitioning = session ? isTerminalSessionTransitioning(session.status) : false;
-  const isLoading = session ? isTerminalSessionLoading(session.status) : false;
+  const isLoading = session ? isTerminalSessionLoading(session.operation) : false;
   const isRunning = Boolean(session?.hasActiveProcess);
+  const isStarting =
+    session?.operation === "starting" || session?.operation === "restarting";
+  const isStopping = session?.operation === "stopping";
 
   return (
     <div
@@ -165,7 +167,7 @@ function ActionItem({
           </motion.div>
         )}
       </AnimatePresence>
-      <div className="flex size-5 shrink-0 items-center justify-center">
+      <div className="relative flex size-5 shrink-0 items-center justify-center">
         {isLoading ? (
           <RiLoader4Line className="size-3.5 animate-spin" />
         ) : isRunning ? (
@@ -173,16 +175,18 @@ function ActionItem({
         ) : (
           <RiFlashlightLine className="size-3.5" />
         )}
+        {command.source === "local" && (
+          <span
+            aria-hidden
+            title="Personal command (not shared with team)"
+            className="absolute -right-1 -top-1 flex size-2.5 items-center justify-center rounded-full bg-background text-muted-foreground"
+          >
+            <RiUserLine className="size-2" />
+          </span>
+        )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="block min-w-0 flex-1 truncate text-sm font-medium leading-tight">{command.name}</span>
-          {command.source === "local" && (
-            <span className="shrink-0 text-amber-500/60 dark:text-amber-400/50" title="Personal command (not shared with team)">
-              <RiUserLine className="size-3" />
-            </span>
-          )}
-        </div>
+        <span className="block min-w-0 truncate text-sm font-medium leading-tight">{command.name}</span>
       </div>
       <div
         className={cn(
@@ -193,30 +197,29 @@ function ActionItem({
       >
         {tab && (
           <>
-            {isRunning ? (
+            {isRunning || isStarting ? (
               <>
                 <Button
-                  disabled={isTransitioning}
+                  disabled={isStarting || isStopping}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(e) => {
                     triggerInlineControl(e, () => {
-                      if (isTransitioning) return;
+                      if (isStarting || isStopping) return;
                       onRestart();
                     });
                   }}
                 >
-                  <RiRefreshLine />
+                  {isStarting ? <RiLoader4Line className="animate-spin" /> : <RiRefreshLine />}
                 </Button>
                 <Button
-                  disabled={isTransitioning}
+                  disabled={false}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(e) => {
                     triggerInlineControl(e, () => {
-                      if (isTransitioning) return;
                       onStop();
                     });
                   }}
@@ -226,18 +229,19 @@ function ActionItem({
               </>
             ) : (
               <Button
-                disabled={isTransitioning}
+                disabled={false}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
                 onClick={(e) => {
                   triggerInlineControl(e, () => {
-                    if (isTransitioning) return;
                     onRun();
                   });
                 }}
               >
-                {isLoading ? (
+                {isStopping ? (
+                  <RiPlayLine />
+                ) : isLoading ? (
                   <RiLoader4Line className="animate-spin" />
                 ) : (
                   <RiPlayLine />
@@ -382,17 +386,17 @@ function TabItem({
           </motion.div>
         )}
         {isBooting && !isLoading && (
-          <motion.svg
+          <motion.div
             key="booting"
-            className="pointer-events-none absolute inset-0 h-full w-full"
+            className="booting-overlay"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.8, ease: "easeInOut" }}
+            transition={{ duration: 0.35, ease: "easeOut" }}
             aria-hidden
           >
-            <rect className="booting-rect" pathLength={1} />
-          </motion.svg>
+            <span className="booting-label">Terminal starting</span>
+          </motion.div>
         )}
         {isRunning && !isLoading && (
           <motion.div
@@ -441,7 +445,7 @@ function TabItem({
         onMouseDown={onMouseDown}
       >
         <div className={cn(
-          "flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",
+          "relative flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",
           active ? "bg-foreground/[0.07]" : "bg-transparent group-hover:bg-foreground/[0.05]",
         )}>
           {isRunning && !isLoading ? (
@@ -453,6 +457,15 @@ function TabItem({
                 isLoading && "animate-spin",
               )}
             />
+          )}
+          {isPersonal && (
+            <span
+              aria-hidden
+              title="Personal command (not shared with team)"
+              className="absolute -right-0.5 -top-0.5 flex size-3 items-center justify-center rounded-full bg-background text-muted-foreground"
+            >
+              <RiUserLine className="size-2.5" />
+            </span>
           )}
         </div>
         <div className="min-w-0 flex-1">
@@ -494,11 +507,6 @@ function TabItem({
                 </span>
               )}
             </div>
-            {isPersonal && (
-              <span className="shrink-0 text-amber-500/60 dark:text-amber-400/50" title="Personal command (not shared with team)">
-                <RiUserLine className="size-3" />
-              </span>
-            )}
           </div>
           {!isEditing && (
             <p className="truncate text-xs leading-tight text-muted-foreground">
@@ -627,10 +635,15 @@ function SortableTabItem({
 
   const command = tab.kind === "command" ? commandByTabId(commands, tab.id) : null;
   const session = terminalSessions[tab.id];
-  const isTransitioning = session ? isTerminalSessionTransitioning(session.status) : false;
-  const isLoading = session ? isTerminalSessionLoading(session.status) : false;
+  const isTransitioning = session
+    ? isTerminalSessionTransitioning(session.status, session.operation)
+    : false;
+  const isLoading = session ? isTerminalSessionLoading(session.operation) : false;
   const isBooting = session?.status === "booting";
   const isRunning = Boolean(session?.hasActiveProcess);
+  const isStarting =
+    session?.operation === "starting" || session?.operation === "restarting";
+  const isStopping = session?.operation === "stopping";
   const isEditing = tab.kind === "shell" && renamingShellTabId === tab.id;
   const subtitle = isBooting
     ? "Booting…"
@@ -677,30 +690,29 @@ function SortableTabItem({
       actions={
         tab.kind === "command" ? (
           <>
-            {isRunning ? (
+            {isRunning || isStarting ? (
               <>
                 <Button
-                  disabled={isTransitioning}
+                  disabled={isStarting || isStopping}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(event) => {
                     triggerInlineControl(event, () => {
-                      if (isTransitioning) return;
+                      if (isStarting || isStopping) return;
                       onRestartTab(tab);
                     });
                   }}
                 >
-                  <RiRefreshLine />
+                  {isStarting ? <RiLoader4Line className="animate-spin" /> : <RiRefreshLine />}
                 </Button>
                 <Button
-                  disabled={isTransitioning}
+                  disabled={false}
                   size="icon-xs"
                   type="button"
                   variant="ghost"
                   onClick={(event) => {
                     triggerInlineControl(event, () => {
-                      if (isTransitioning) return;
                       onStopTab(tab);
                     });
                   }}
@@ -710,18 +722,19 @@ function SortableTabItem({
               </>
             ) : (
               <Button
-                disabled={isTransitioning}
+                disabled={false}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
                 onClick={(event) => {
                   triggerInlineControl(event, () => {
-                    if (isTransitioning) return;
                     onRunTab(tab);
                   });
                 }}
               >
-                {isLoading ? (
+                {isStopping ? (
+                  <RiPlayLine />
+                ) : isLoading ? (
                   <RiLoader4Line className="animate-spin" />
                 ) : (
                   <RiPlayLine />
@@ -730,7 +743,7 @@ function SortableTabItem({
             )}
             {command && (
               <Button
-                disabled={isTransitioning}
+                disabled={false}
                 size="icon-xs"
                 type="button"
                 variant="ghost"
